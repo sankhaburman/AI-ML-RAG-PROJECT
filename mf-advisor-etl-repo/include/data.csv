@@ -1,0 +1,11 @@
+date,customer_id,product,category,amount,city
+2024-01-01,C001,Laptop,Electronics,75000,Bangalore
+2024-01-02,C002,Phone,Electronics,25000,Mumbai
+2024-01-03,C003,Shoes,Fashion,3000,Delhi
+2024-01-04,C004,Watch,Accessories,5000,Chennai
+2024-01-05,C005,Tablet,Electronics,20000,Hyderabad
+2024-01-06,C006,Headphones,Electronics,2000,Pune
+2024-01-07,C007,Jacket,Fashion,4000,Kolkata
+2024-01-08,C008,Backpack,Accessories,1500,Ahmedabad
+2024-01-09,C009,Camera,Electronics,45000,Jaipur
+2024-01-10,C010,Sunglasses,Accessories,1200,Goa
