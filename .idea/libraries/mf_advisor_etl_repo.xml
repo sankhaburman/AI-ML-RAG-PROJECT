@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="mf-advisor-etl-repo">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/mf-advisor-etl-repo.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
