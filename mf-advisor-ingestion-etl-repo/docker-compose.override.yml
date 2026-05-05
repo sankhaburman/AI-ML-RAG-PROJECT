@@ -46,6 +46,7 @@ services:
       - ./apps:/opt/spark-apps
       - ./data:/opt/spark-data
       - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar  # ✅ Mount JDBC driver
+      - postgres_data:/var/lib/postgresql/data
     depends_on:
       - spark-master
     networks:
@@ -53,3 +54,4 @@ services:
 
 volumes:
   spark-data:
+  postgres_data:
