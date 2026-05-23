@@ -9,3 +9,8 @@ airflow-webserver.pid
 webserver_config.py
 airflow.cfg
 airflow.db
+/.astro/dag_integrity_exceptions.txt
+/packages.txt
+/requirements.txt
+/tests/dags/test_dag_example.py
+/.astro/test_dag_integrity_default.py

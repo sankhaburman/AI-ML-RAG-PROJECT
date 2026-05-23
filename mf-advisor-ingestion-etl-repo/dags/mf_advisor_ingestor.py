@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 POSTGRES_CONN_ID = 'postgres_default'
 API_CONN_ID = 'mf_api'
 
-BATCH_SIZE = 10
+BATCH_SIZE = 500
 INSERT_BATCH_SIZE = 5000
 
 default_args = {
@@ -220,7 +220,7 @@ with DAG(
         cursor = conn.cursor()
 
         insert_query = """
-        INSERT INTO raw_nav (
+        INSERT INTO mf_raw_nav (
             scheme_code,
             nav_date,
             nav,
@@ -417,7 +417,7 @@ with DAG(
 
                     existing_query = """
                     SELECT nav_date
-                    FROM raw_nav
+                    FROM mf_raw_nav
                     WHERE scheme_code = %s;
                     """
 
