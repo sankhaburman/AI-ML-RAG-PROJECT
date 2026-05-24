@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 POSTGRES_CONN_ID = 'postgres_default'
 API_CONN_ID = 'mf_api'
 
-BATCH_SIZE = 500
-INSERT_BATCH_SIZE = 5000
+BATCH_SIZE = 1000
+INSERT_BATCH_SIZE = 7000
 
 default_args = {
     'owner': 'airflow',
