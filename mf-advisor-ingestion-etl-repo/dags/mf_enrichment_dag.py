@@ -161,7 +161,7 @@ with DAG(
     #)
 
     daily_return_task = SparkSubmitOperator(task_id="daily_return_task",
-                                    application="./include/scripts/mf_daily_return_enricher/daily_return.py",
+                                    application="./include/scripts/mf_daily_return_enricher/calculate_daily_return.py",
                                     conn_id="my_spark_conn",
                                     verbose=True,
                                     packages="org.postgresql:postgresql:42.7.3",

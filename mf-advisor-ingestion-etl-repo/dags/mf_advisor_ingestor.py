@@ -1,4 +1,5 @@
 from airflow import DAG
+from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.providers.http.hooks.http import HttpHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.decorators import task
@@ -42,6 +43,7 @@ with DAG(
     # CREATE TABLES
     #########################################################
 
+    @task
     def create_tables():
 
         logger.info("Creating tables if not exists")
@@ -49,6 +51,10 @@ with DAG(
         pg_hook = PostgresHook(
             postgres_conn_id=POSTGRES_CONN_ID
         )
+
+        #####################################################
+        # CREATE TABLES
+        #####################################################
 
         create_scheme_table = """
         CREATE TABLE IF NOT EXISTS mf_schemes (
@@ -60,7 +66,7 @@ with DAG(
         );
         """
 
-        create_nav_table = """
+        create_raw_nav_table = """
         CREATE TABLE IF NOT EXISTS mf_raw_nav (
             scheme_code BIGINT,
             nav_date DATE,
@@ -72,8 +78,62 @@ with DAG(
         );
         """
 
+        #####################################################
+        # DAILY RETURN TABLE
+        #####################################################
+
+        create_daily_return_table = """
+        CREATE TABLE IF NOT EXISTS mf_daily_returns (
+            scheme_code BIGINT,
+            nav_date DATE,
+            nav NUMERIC(18,6),
+            fund_house TEXT,
+            scheme_name TEXT,
+            daily_returns NUMERIC(18,6),
+            weekly_return NUMERIC(18,6),
+            monthly_return NUMERIC(18,6),
+            rolling_return_30d NUMERIC(18,6),
+            rolling_return_90d NUMERIC(18,6),
+            moving_avg_7 NUMERIC(18,6),
+            moving_avg_30 NUMERIC(18,6),
+            moving_avg_90 NUMERIC(18,6),
+            moving_avg_200 NUMERIC(18,6),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (scheme_code, nav_date)
+        );
+        """
+
+        #####################################################
+        # AGGREGATED METRICS TABLE
+        #####################################################
+
+        create_aggregated_metrics_table = """
+        CREATE TABLE IF NOT EXISTS mf_aggregated_scheme_metrics (
+            scheme_code BIGINT PRIMARY KEY,
+            cagr_percentage NUMERIC(18,7),
+            sharp_ratio NUMERIC(18,7),
+            daily_volatility NUMERIC(18,7),
+            annualized_volatility NUMERIC(18,7),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+
+        create_index_mf_raw_nav = """
+        CREATE INDEX IF NOT EXISTS idx_mf_raw_nav_scheme_date
+            ON mf_raw_nav (
+            scheme_code,
+            nav_date
+        );
+        """
+
+        #####################################################
+        # EXECUTE QUERIES
+        #####################################################
         pg_hook.run(create_scheme_table)
-        pg_hook.run(create_nav_table)
+        pg_hook.run(create_raw_nav_table)
+        pg_hook.run(create_daily_return_table)
+        pg_hook.run(create_aggregated_metrics_table)
+        pg_hook.run(create_index_mf_raw_nav)
 
         logger.info("Tables ready")
 
@@ -82,85 +142,53 @@ with DAG(
     #########################################################
 
     def transform_scheme_data(raw_json):
-
         logger.info("Transforming scheme data")
-
         transformed = []
-
         for item in raw_json:
-
             transformed.append((
                 item.get("schemeCode"),
                 item.get("schemeName"),
                 item.get("isinGrowth"),
                 item.get("isinDivReinvestment")
             ))
-
-        logger.info(
-            f"Total transformed schemes: "
-            f"{len(transformed)}"
-        )
-
+        logger.info(f"Total transformed schemes: {len(transformed)}")
         return transformed
-
     #########################################################
     # FILTER EXISTING SCHEMES
     #########################################################
 
     def filter_existing_schemes(schemes):
-
         logger.info("Checking existing schemes")
-
         pg_hook = PostgresHook(
             postgres_conn_id=POSTGRES_CONN_ID
         )
-
         existing_query = """
         SELECT scheme_code
         FROM mf_schemes;
         """
-
-        existing_records = pg_hook.get_records(
-            existing_query
-        )
-
+        existing_records = pg_hook.get_records(existing_query)
         existing_codes = {
             row[0] for row in existing_records
         }
-
         new_schemes = [
             scheme for scheme in schemes
             if scheme[0] not in existing_codes
         ]
-
-        logger.info(
-            f"New schemes identified: "
-            f"{len(new_schemes)}"
-        )
-
+        logger.info(f"New schemes identified: {len(new_schemes)}")
         return new_schemes
-
     #########################################################
     # BATCH INSERT SCHEME DATA
     #########################################################
-
     def load_scheme_data(schemes):
-
         if not schemes:
             logger.info("No schemes to insert")
             return
-
-        logger.info(
-            f"Inserting {len(schemes)} schemes"
-        )
-
+        logger.info(f"Inserting {len(schemes)} schemes")
         pg_hook = PostgresHook(
             postgres_conn_id=POSTGRES_CONN_ID
         )
-
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
-
         insert_query = """
         INSERT INTO mf_schemes (
             scheme_code,
@@ -172,53 +200,35 @@ with DAG(
         ON CONFLICT (scheme_code)
         DO NOTHING;
         """
-
         execute_batch(
             cursor,
             insert_query,
             schemes,
             page_size=1000
         )
-
         conn.commit()
-
         cursor.close()
         conn.close()
-
         logger.info("Scheme insertion completed")
-
     #########################################################
     # DATE CONVERTER
     #########################################################
-
     def convert_date_format(date_str):
-
         day, month, year = date_str.split("-")
-
         return f"{year}-{month}-{day}"
-
     #########################################################
     # INSERT NAV DATA IN BATCHES
     #########################################################
-
     def insert_nav_data_batch(nav_rows):
-
         if not nav_rows:
             logger.info("No NAV rows to insert")
             return
-
-        logger.info(
-            f"Inserting batch of "
-            f"{len(nav_rows)} NAV rows"
-        )
-
+        logger.info(f"Inserting batch of {len(nav_rows)} NAV rows")
         pg_hook = PostgresHook(
             postgres_conn_id=POSTGRES_CONN_ID
         )
-
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
-
         insert_query = """
         INSERT INTO mf_raw_nav (
             scheme_code,
@@ -248,11 +258,10 @@ with DAG(
         conn.commit()
 
         cursor.close()
+
         conn.close()
 
-        logger.info(
-            "NAV batch insertion completed"
-        )
+        logger.info("NAV batch insertion completed")
 
     #########################################################
     # FETCH ALL MF SCHEMES
@@ -261,43 +270,25 @@ with DAG(
     @task
     def fetch_all_mutual_fund():
 
-        logger.info(
-            "Starting mutual fund ingestion"
-        )
+        logger.info("Starting mutual fund ingestion")
 
         http_hook = HttpHook(
             http_conn_id=API_CONN_ID,
             method='GET'
         )
 
-        endpoint = '/mf'
+        response = http_hook.run('/mf')
 
-        response = http_hook.run(endpoint)
-
-        logger.info(
-            f"MF API status: "
-            f"{response.status_code}"
-        )
+        logger.info(f"MF API status: {response.status_code}")
 
         if response.status_code != 200:
-
-            logger.error("MF API failed")
-
             raise Exception(
-                f"API failed with "
-                f"{response.status_code}"
+                f"API failed with {response.status_code}"
             )
 
         raw_data = response.json()
 
-        logger.info(
-            f"Total schemes received: "
-            f"{len(raw_data)}"
-        )
-
-        transformed_data = transform_scheme_data(
-            raw_data
-        )
+        transformed_data = transform_scheme_data(raw_data)
 
         validated_data = filter_existing_schemes(
             transformed_data
@@ -306,15 +297,13 @@ with DAG(
         load_scheme_data(validated_data)
 
     #########################################################
-    # FETCH NAV DATA IN BATCHES
+    # FETCH NAV DATA
     #########################################################
 
     @task
     def fetch_nav_data():
 
-        logger.info(
-            "Starting NAV ingestion"
-        )
+        logger.info("Starting NAV ingestion")
 
         pg_hook = PostgresHook(
             postgres_conn_id=POSTGRES_CONN_ID
@@ -330,23 +319,15 @@ with DAG(
             scheme_query
         )
 
-        logger.info(
-            f"Total schemes to process: "
-            f"{len(scheme_records)}"
-        )
-
         scheme_codes = [
-            row[0] for row in scheme_records
+            row[0]
+            for row in scheme_records
         ]
 
         http_hook = HttpHook(
             http_conn_id=API_CONN_ID,
             method='GET'
         )
-
-        #####################################################
-        # PROCESS API CALLS IN BATCHES
-        #####################################################
 
         for batch_start in range(
                 0,
@@ -360,60 +341,28 @@ with DAG(
                 batch_start:batch_end
             ]
 
-            logger.info(
-                f"Processing batch "
-                f"{batch_start} to {batch_end}"
-            )
-
             batch_nav_rows = []
-
-            #################################################
-            # FETCH NAV DATA
-            #################################################
 
             for scheme_code in batch_scheme_codes:
 
                 try:
 
-                    endpoint = f'/mf/{scheme_code}'
-
                     response = http_hook.run(
-                        endpoint
+                        f'/mf/{scheme_code}'
                     )
 
                     if response.status_code != 200:
-
-                        logger.warning(
-                            f"Skipping "
-                            f"{scheme_code} "
-                            f"due to API failure"
-                        )
-
                         continue
 
                     nav_json = response.json()
 
-                    meta = nav_json.get(
-                        "meta",
-                        {}
-                    )
+                    meta = nav_json.get("meta", {})
 
-                    nav_data = nav_json.get(
-                        "data",
-                        []
-                    )
+                    nav_data = nav_json.get("data", [])
 
-                    fund_house = meta.get(
-                        "fund_house"
-                    )
+                    fund_house = meta.get("fund_house")
 
-                    scheme_name = meta.get(
-                        "scheme_name"
-                    )
-
-                    #################################################
-                    # FETCH EXISTING NAV DATES
-                    #################################################
+                    scheme_name = meta.get("scheme_name")
 
                     existing_query = """
                     SELECT nav_date
@@ -424,9 +373,7 @@ with DAG(
                     existing_records = (
                         pg_hook.get_records(
                             existing_query,
-                            parameters=(
-                                scheme_code,
-                            )
+                            parameters=(scheme_code,)
                         )
                     )
 
@@ -435,32 +382,17 @@ with DAG(
                         for row in existing_records
                     }
 
-                    #################################################
-                    # FILTER NEW NAV DATA
-                    #################################################
-
-                    new_count = 0
-
                     for nav_item in nav_data:
 
-                        nav_date = nav_item.get(
-                            "date"
+                        nav_date = nav_item.get("date")
+
+                        nav_value = nav_item.get("nav")
+
+                        formatted_date = convert_date_format(
+                            nav_date
                         )
 
-                        nav_value = nav_item.get(
-                            "nav"
-                        )
-
-                        formatted_date = (
-                            convert_date_format(
-                                nav_date
-                            )
-                        )
-
-                        if (
-                                formatted_date
-                                in existing_dates
-                        ):
+                        if formatted_date in existing_dates:
                             continue
 
                         batch_nav_rows.append((
@@ -471,30 +403,11 @@ with DAG(
                             scheme_name
                         ))
 
-                        new_count += 1
-
-                    logger.info(
-                        f"{scheme_code} -> "
-                        f"New NAV rows: "
-                        f"{new_count}"
-                    )
-
                 except Exception as e:
 
                     logger.error(
-                        f"Error processing "
-                        f"{scheme_code}: "
-                        f"{str(e)}"
+                        f"Error processing {scheme_code}: {str(e)}"
                     )
-
-            #################################################
-            # INSERT NAV DATA IN BATCHES
-            #################################################
-
-            logger.info(
-                f"Batch NAV rows ready: "
-                f"{len(batch_nav_rows)}"
-            )
 
             for insert_start in range(
                     0,
@@ -511,26 +424,42 @@ with DAG(
                     insert_start:insert_end
                 ]
 
-                insert_nav_data_batch(
-                    insert_batch
-                )
+                insert_nav_data_batch(insert_batch)
+
+        logger.info("NAV ingestion completed")
+
+    #########################################################
+    # ENRICH NAV DATA USING SPARK
+    #########################################################
+
+    @task
+    def enrich_scheme_with_daily_returns():
 
         logger.info(
-            "NAV ingestion completed"
+            "Starting NAV enrichment with Daily Returns using Spark"
         )
 
-    #########################################################
-    # INITIALIZE TABLES
-    #########################################################
+        spark_task = SparkSubmitOperator(
+            task_id="daily_return_task",
+            application="./include/scripts/mf_enricher/calculate_daily_return.py",
+            conn_id="my_spark_conn",
+            verbose=True,
+            packages="org.postgresql:postgresql:42.7.3",
+            jars="/opt/spark/jars/postgresql-42.7.3.jar"
+        )
 
-    create_tables()
+        spark_task.execute(context={})
+
+        logger.info(
+            "NAV enrichment completed"
+        )
 
     #########################################################
     # DAG FLOW
     #########################################################
-
+    create_tables_task = create_tables()
     schemes_task = fetch_all_mutual_fund()
-
     nav_task = fetch_nav_data()
+    enrich_with_daily_return_task = enrich_scheme_with_daily_returns()
 
-    schemes_task >> nav_task
+    create_tables_task >> schemes_task >> nav_task >> enrich_with_daily_return_task
