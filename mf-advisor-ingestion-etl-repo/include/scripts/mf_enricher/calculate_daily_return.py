@@ -388,11 +388,7 @@ def validate_dataframe(df):
 # =========================================================
 # WRITE OUTPUT
 # =========================================================
-def write_to_postgres(
-        df,
-        connection
-):
-
+def write_to_postgres(df,connection):
     logger.info(f"Writing data to PostgreSQL table: {OUTPUT_TABLE}")
     (
         df.write
@@ -432,9 +428,7 @@ def calculate_daily_returns():
         new_df=result_df,
         connection=connection
     )
-
     validate_dataframe(delta_df)
-
     # -----------------------------------------
     # Write Output
     # -----------------------------------------
@@ -448,12 +442,9 @@ def calculate_daily_returns():
     logger.info(
         "MF Daily Return Enrichment pipeline completed successfully."
     )
-
-
 # =========================================================
 # ENTRY POINT
 # =========================================================
-
 def main():
     calculate_daily_returns()
 

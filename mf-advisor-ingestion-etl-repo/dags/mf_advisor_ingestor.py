@@ -109,6 +109,31 @@ with DAG(
         );
         """
 
+        create_final_nav_table = """
+        CREATE TABLE IF NOT EXISTS mf_final_nav_enriched (
+            scheme_code BIGINT,
+            nav_date DATE,
+            nav NUMERIC(18,6),
+            fund_house TEXT,
+            scheme_name TEXT,
+            daily_returns NUMERIC(18,6),
+            weekly_return NUMERIC(18,6),
+            monthly_return NUMERIC(18,6),
+            rolling_return_30d NUMERIC(18,6),
+            rolling_return_90d NUMERIC(18,6),
+            moving_avg_7 NUMERIC(18,6),
+            moving_avg_30 NUMERIC(18,6),
+            moving_avg_90 NUMERIC(18,6),
+            moving_avg_200 NUMERIC(18,6),
+            cagr_percentage NUMERIC(18,7),
+            sharp_ratio NUMERIC(18,7),
+            daily_volatility NUMERIC(18,7),
+            annualized_volatility NUMERIC(18,7),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (scheme_code, nav_date)
+        );
+        """
+
         #####################################################
         # EXECUTE QUERIES
         #####################################################
@@ -117,6 +142,7 @@ with DAG(
         pg_hook.run(create_daily_return_table)
         pg_hook.run(create_aggregated_metrics_table)
         pg_hook.run(create_index_mf_raw_nav)
+        pg_hook.run(create_final_nav_table)
         logger.info("Tables ready")
 
     #########################################################
@@ -348,6 +374,23 @@ with DAG(
         )
         spark_task.execute(context={})
         logger.info("Aggregated Metrics enrichment completed")
+
+    #########################################################
+    # COMBINE FINAL NAV ENRICHED TABLE USING SPARK
+    #########################################################
+    @task
+    def combine_nav_enriched_data():
+        logger.info("Starting combining mf_daily_return and mf_aggregated_scheme_metrics using Spark")
+        spark_task = SparkSubmitOperator(
+            task_id="final_nav_enrich_task",
+            application="./include/scripts/mf_enricher/combine_enriched_nav.py",
+            conn_id="my_spark_conn",
+            verbose=True,
+            packages="org.postgresql:postgresql:42.7.3",
+            jars="/opt/spark/jars/postgresql-42.7.3.jar"
+        )
+        spark_task.execute(context={})
+        logger.info("Combining enrichment NAV completed")
     #########################################################
     # DAG FLOW
     #########################################################
@@ -356,5 +399,6 @@ with DAG(
     nav_task = fetch_nav_data()
     enrich_with_daily_return_task = enrich_scheme_with_daily_returns()
     enrich_with_aggregated_return_task = enrich_scheme_with_aggregated_metrics()
+    combine_nav_enriched_data_task = combine_nav_enriched_data()
 
-    create_tables_task >> schemes_task >> nav_task >> enrich_with_daily_return_task >> enrich_with_aggregated_return_task
+    create_tables_task >> schemes_task >> nav_task >> enrich_with_daily_return_task >> enrich_with_aggregated_return_task >> combine_nav_enriched_data_task
