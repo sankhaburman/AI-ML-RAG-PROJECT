@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # =========================================================
 
-APP_NAME = "MF-Enrichment-JOB"
+APP_NAME = "CALCULATE-DAILY-RETURN-JOB"
 POSTGRES_DRIVER = "org.postgresql.Driver"
 FETCH_SIZE = "1000"
 LOOKBACK_PERIOD = "3 years"
@@ -410,20 +410,10 @@ def write_to_postgres(
 # =========================================================
 # MAIN PIPELINE
 # =========================================================
-def run_feature_engineering_pipeline():
+def calculate_daily_returns():
     logger.info("Starting mutual fund feature engineering pipeline...")
-    # -----------------------------------------
-    # Spark Session
-    # -----------------------------------------
     spark = create_spark_session()
-    # -----------------------------------------
-    # PostgreSQL Connection
-    # -----------------------------------------
     connection = get_postgres_connection()
-
-    # -----------------------------------------
-    # Build Query
-    # -----------------------------------------
     query = build_feature_engineering_query()
     logger.info("Generated SQL query successfully.")
     # -----------------------------------------
@@ -456,7 +446,7 @@ def run_feature_engineering_pipeline():
     # -----------------------------------------
     spark.stop()
     logger.info(
-        "MF Enrichment pipeline completed successfully."
+        "MF Daily Return Enrichment pipeline completed successfully."
     )
 
 
@@ -465,7 +455,7 @@ def run_feature_engineering_pipeline():
 # =========================================================
 
 def main():
-    run_feature_engineering_pipeline()
+    calculate_daily_returns()
 
 if __name__ == "__main__":
     main()
