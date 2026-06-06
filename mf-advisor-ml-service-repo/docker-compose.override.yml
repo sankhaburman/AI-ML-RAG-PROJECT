@@ -1,0 +1,79 @@
+services:
+
+  postgres:
+    image: postgres:12.6
+    container_name: postgres
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+
+    ports:
+      - "5430:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - airflow
+
+  spark-master-2:
+    image: apache/spark:4.1.2
+    container_name: spark-master-2
+    hostname: spark-master-2
+
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+
+    ports:
+      - "8082:8080"
+      - "7078:7077"
+
+    volumes:
+      - spark-data-2:/opt/spark/work-dir
+      - ./include:/usr/local/airflow/include
+      - ./apps:/opt/spark-apps
+      - ./data:/opt/spark-data
+      - ./dags:/usr/local/airflow/dags
+      - ./plugins:/usr/local/airflow/plugins
+      - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
+
+    networks:
+      - airflow
+
+  spark-worker-2:
+    image: apache/spark:4.1.2
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master-2:7077
+
+    environment:
+      - SPARK_WORKER_CORES=7
+      - SPARK_WORKER_MEMORY=10G
+
+    depends_on:
+      - spark-master-2
+
+    volumes:
+      - spark-data-2:/opt/spark/work-dir
+      - ./include:/usr/local/airflow/include
+      - ./apps:/opt/spark-apps
+      - ./data:/opt/spark-data
+      - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
+
+    networks:
+      - airflow
+
+volumes:
+  postgres_data:
+  spark-data-2:
+
+networks:
+  airflow:
+    driver: bridge

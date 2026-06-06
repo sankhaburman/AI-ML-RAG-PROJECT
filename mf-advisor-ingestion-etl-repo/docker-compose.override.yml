@@ -3,61 +3,64 @@ x-airflow-common: &airflow-common
     - ./include:/usr/local/airflow/include
 
 services:
+
   spark-master:
     image: apache/spark:4.1.2
-    container_name: spark-master
-    hostname: spark-master
 
     command: >
+      bash -c "
+      mkdir -p /tmp/spark /tmp/models &&
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.master.Master
+      "
+
+    environment:
+      - MODEL_PATH=/tmp/models
+      - SPARK_LOCAL_DIRS=/tmp/spark
+
+    volumes:
+      - ./include:/usr/local/airflow/include
+      - ./apps:/opt/spark-apps
+      - ./data:/tmp/spark-data
+      - ./models:/tmp/models
 
     ports:
       - "8081:8080"
       - "7077:7077"
 
-    volumes:
-      - spark-data:/opt/spark/work-dir
-      - ./include:/usr/local/airflow/include
-      - ./apps:/opt/spark-apps
-      - ./data:/opt/spark-data
-      - ./dags:/usr/local/airflow/dags
-      - ./plugins:/usr/local/airflow/plugins
-      - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
-
     networks:
       - airflow
 
+
   spark-worker:
     image: apache/spark:4.1.2
-    container_name: spark-worker
-    hostname: spark-worker
 
     command: >
+      bash -c "
+      mkdir -p /tmp/spark /tmp/models &&
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.worker.Worker
       spark://spark-master:7077
+      "
 
     environment:
       - SPARK_WORKER_CORES=7
       - SPARK_WORKER_MEMORY=10G
+      - MODEL_PATH=/tmp/models
+      - SPARK_LOCAL_DIRS=/tmp/spark
 
     depends_on:
       - spark-master
 
     volumes:
-      - spark-data:/opt/spark/work-dir
       - ./include:/usr/local/airflow/include
       - ./apps:/opt/spark-apps
-      - ./data:/opt/spark-data
-      - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
+      - ./data:/tmp/spark-data
+      - ./models:/tmp/models
 
     networks:
       - airflow
 
-volumes:
-  spark-data:
-  postgres_data:
 
 networks:
   airflow:
