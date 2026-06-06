@@ -26,7 +26,8 @@ with DAG(
         dag_id='mf_advisor_ingestion_pipeline',
         default_args=default_args,
         schedule_interval='@weekly',
-        catchup=False
+        catchup=False,
+        tags=["mfadvisor-data-ingestion"]
 ) as dag:
 
     #########################################################
