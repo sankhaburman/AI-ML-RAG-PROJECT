@@ -2,16 +2,19 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import logging
 
-from app.router import route_request
-from app.engine import analyze_portfolio, answer_question
+from mf_advisor.service.engine import analyze_portfolio, answer_question
+from mf_advisor.service.llmintentservice import LLMIntentService
+from mf_advisor.service.router import route_request
 
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
+intent_service = LLMIntentService()
 
 class InputRequest(BaseModel):
     portfolio: dict | None = None
     question: str | None = None
+
 
 
 @app.post("/process")
@@ -29,6 +32,7 @@ def process(req: InputRequest):
     except Exception as e:
         return {"error": f"route_request failed: {str(e)}"}
 
+    user_intent = intent_service.find_user_intent(question)
     try:
         if route == "portfolio":
             if not portfolio:
