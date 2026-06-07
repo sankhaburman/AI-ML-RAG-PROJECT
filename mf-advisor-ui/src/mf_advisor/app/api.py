@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import logging
 
 from mf_advisor.service.engine import analyze_portfolio, answer_question
-from mf_advisor.service.llmintentservice import LLMIntentService
+from mf_advisor.service.llm_intent_service import LLMIntentService
 from mf_advisor.service.router import route_request
 
 logging.basicConfig(level=logging.INFO)
