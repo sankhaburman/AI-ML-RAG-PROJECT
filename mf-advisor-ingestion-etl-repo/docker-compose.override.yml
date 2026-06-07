@@ -1,21 +1,20 @@
-x-airflow-common: &airflow-common
-  volumes:
-    - ./include:/usr/local/airflow/include
+version: '3.8'
 
 services:
 
-  # =====================================================
-  # SPARK MASTER
-  # =====================================================
   spark-master:
     image: apache/spark:4.1.2
-
     container_name: spark-master
     hostname: spark-master
 
+    user: root
+
     command: >
       bash -c "
-      mkdir -p /tmp/spark /tmp/models &&
+      mkdir -p /tmp/spark &&
+      mkdir -p /tmp/models &&
+      chmod -R 777 /tmp/models &&
+      chmod -R 777 /tmp/spark &&
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.master.Master
       "
@@ -32,28 +31,28 @@ services:
       - ./include:/usr/local/airflow/include
       - ./apps:/opt/spark-apps
 
-      # ✅ WINDOWS SAFE MODEL MOUNT
+      # Windows host path
       - C:/spark-models:/tmp/models
 
-      # optional local spark data
+      # Optional
       - C:/spark-data:/tmp/spark-data
 
     networks:
       - airflow
 
-
-  # =====================================================
-  # SPARK WORKER
-  # =====================================================
   spark-worker:
     image: apache/spark:4.1.2
-
     container_name: spark-worker
     hostname: spark-worker
 
+    user: root
+
     command: >
       bash -c "
-      mkdir -p /tmp/spark /tmp/models &&
+      mkdir -p /tmp/spark &&
+      mkdir -p /tmp/models &&
+      chmod -R 777 /tmp/models &&
+      chmod -R 777 /tmp/spark &&
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.worker.Worker
       spark://spark-master:7077
@@ -72,18 +71,15 @@ services:
       - ./include:/usr/local/airflow/include
       - ./apps:/opt/spark-apps
 
-      # ✅ SAME WINDOWS MOUNT (MUST MATCH MASTER)
+      # SAME Windows path
       - C:/spark-models:/tmp/models
 
+      # Optional
       - C:/spark-data:/tmp/spark-data
 
     networks:
       - airflow
 
-
-# =====================================================
-# NETWORK
-# =====================================================
 networks:
   airflow:
     driver: bridge

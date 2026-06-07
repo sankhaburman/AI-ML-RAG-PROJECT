@@ -13,21 +13,13 @@ from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 
 logger = logging.getLogger(__name__)
-
-# =========================================================
-# CONFIGURATION (FIXED)
-# =========================================================
-
 APP_NAME = "RANDOM-FOREST-ML-JOB"
 POSTGRES_DRIVER = "org.postgresql.Driver"
 
 MODEL_BASE_PATH = "/tmp/models"
 MODEL_PATH = "/tmp/models/latest"
 
-# =========================================================
 # SPARK SESSION
-# =========================================================
-
 def create_spark_session():
     return (
         SparkSession.builder
@@ -41,29 +33,21 @@ def create_spark_session():
         .getOrCreate()
     )
 
-# =========================================================
 # POSTGRES CONNECTION
-# =========================================================
-
 def get_postgres_connection():
     conn = BaseHook.get_connection("postgres_default")
-
     jdbc_url = (
         f"jdbc:postgresql://{conn.host}:{conn.port or 5432}/{conn.schema}"
     )
-
     return {
         "jdbc_url": jdbc_url,
         "user": conn.login,
         "password": conn.password
     }
 
-# =========================================================
 # LOAD DATA
-# =========================================================
-
+#--------------------------------------------
 def load_training_dataframe(spark, connection):
-
     query = """
     (
         SELECT
@@ -102,12 +86,9 @@ def load_training_dataframe(spark, connection):
         .load()
     )
 
-# =========================================================
 # TARGET CREATION
 # =========================================================
-
 def create_target_column(df):
-
     window_spec = (
         Window.partitionBy("scheme_code")
         .orderBy("nav_date")
@@ -129,13 +110,10 @@ def create_target_column(df):
             ((col("future_nav") - col("nav")) / col("nav")) * 100
         )
     )
-
     return df.filter(col("target_30d_return").isNotNull())
 
-# =========================================================
 # FEATURES
 # =========================================================
-
 def get_feature_columns():
     return [
         "daily_return_pct",
@@ -152,30 +130,22 @@ def get_feature_columns():
         "annualized_volatility"
     ]
 
-# =========================================================
 # DATA PREP
 # =========================================================
-
 def prepare_dataset(df):
     feature_cols = get_feature_columns()
-
     df = df.na.drop(subset=feature_cols)
-
     assembler = VectorAssembler(
         inputCols=feature_cols,
         outputCol="features"
     )
-
     return assembler.transform(df)
 
-# =========================================================
 # TRAIN MODEL
 # =========================================================
 
 def train_model(dataset):
-
     train_df, test_df = dataset.randomSplit([0.8, 0.2], seed=42)
-
     rf = RandomForestRegressor(
         featuresCol="features",
         labelCol="target_30d_return",
@@ -184,53 +154,32 @@ def train_model(dataset):
         maxDepth=8,
         seed=42
     )
-
     model = rf.fit(train_df)
-
     return model
 
+# SAFE MODEL SAVE
 # =========================================================
-# SAFE MODEL SAVE (FIXED)
-# =========================================================
-
 def save_model(model):
-
     logger.info(f"Saving model to {MODEL_PATH}")
-
-    # IMPORTANT: direct Spark write (no shutil, no temp moves)
     model.write().overwrite().save(MODEL_PATH)
-
     logger.info(f"Model saved successfully at {MODEL_PATH}")
-# =========================================================
+
 # TRAIN PIPELINE
 # =========================================================
-
 def train_with_random_forest():
-
     logger.info("Starting ML Training...")
-
     spark = create_spark_session()
-
     connection = get_postgres_connection()
-
     raw_df = load_training_dataframe(spark, connection)
-
     raw_df.show(5, truncate=False)
-
     target_df = create_target_column(raw_df)
-
     dataset = prepare_dataset(target_df)
-
     model = train_model(dataset)
-
     save_model(model)
-
     spark.stop()
 
-# =========================================================
 # ENTRY POINT
 # =========================================================
-
 def main():
     train_with_random_forest()
 
