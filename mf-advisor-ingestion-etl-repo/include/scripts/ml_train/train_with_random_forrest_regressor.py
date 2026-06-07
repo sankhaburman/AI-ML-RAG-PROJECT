@@ -1,25 +1,20 @@
-import os
-import shutil
-import uuid
 import logging
-
 from airflow.hooks.base import BaseHook
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import col, when, lead
-
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import RandomForestRegressor
-from pyspark.ml.evaluation import RegressionEvaluator
 
 logger = logging.getLogger(__name__)
 APP_NAME = "RANDOM-FOREST-ML-JOB"
 POSTGRES_DRIVER = "org.postgresql.Driver"
 
 MODEL_BASE_PATH = "/tmp/models"
-MODEL_PATH = "/tmp/models/latest"
+MODEL_PATH = "/tmp/models/random_forrest/latest"
 
 # SPARK SESSION
+#-------------------------------------------------
 def create_spark_session():
     return (
         SparkSession.builder
