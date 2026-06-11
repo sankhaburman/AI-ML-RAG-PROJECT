@@ -2,7 +2,10 @@ from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.decorators import task
 from airflow.utils.dates import days_ago
+
 import logging
+import pickle
+import pandas as pd
 
 #########################################################
 # LOGGER CONFIGURATION
@@ -15,6 +18,8 @@ API_CONN_ID = "mf_api"
 
 BATCH_SIZE = 1000
 INSERT_BATCH_SIZE = 7000
+
+MODEL_PATH = "/tmp/models/random_forest.pkl"
 
 default_args = {
     "owner": "airflow",
@@ -90,10 +95,76 @@ with DAG(
         return "random_forest_completed"
 
     #########################################################
+    # TASK 3 - VERIFY MODEL
+    #########################################################
+
+    @task(task_id="verify_random_forest_model")
+    def verify_random_forest_model():
+
+        logger.info("=======================================================")
+        logger.info("Starting Random Forest Model Verification")
+        logger.info("=======================================================")
+
+        logger.info(f"Loading model from {MODEL_PATH}")
+
+        with open(MODEL_PATH, "rb") as f:
+            model = pickle.load(f)
+
+        logger.info(
+            f"Model loaded successfully: {type(model)}"
+        )
+
+        logger.info(
+            f"Number of trees: {len(model.estimators_)}"
+        )
+
+        if hasattr(model, "feature_names_in_"):
+            logger.info(
+                f"Feature Names: {list(model.feature_names_in_)}"
+            )
+
+        sample_data = pd.DataFrame([
+            {
+                "daily_return_pct": 0.25,
+                "weekly_return_pct": 1.50,
+                "monthly_return_pct": 4.20,
+                "rolling_return_30d_pct": 5.80,
+                "rolling_return_90d_pct": 12.50,
+                "moving_avg_7d": 102.40,
+                "moving_avg_30d": 101.70,
+                "moving_avg_90d": 99.20,
+                "moving_avg_200d": 95.60,
+                "cagr_percent": 14.30,
+                "sharpe_ratio": 1.40,
+                "annualized_volatility": 12.10,
+            }
+        ])
+
+        if hasattr(model, "feature_names_in_"):
+            sample_data = sample_data[
+                model.feature_names_in_
+            ]
+
+        prediction = model.predict(sample_data)
+
+        logger.info(
+            f"Predicted 30-day return: {prediction[0]:.4f}%"
+        )
+
+        logger.info("=======================================================")
+        logger.info("Model Verification Completed Successfully")
+        logger.info("=======================================================")
+
+        return float(prediction[0])
+
+    #########################################################
     # DAG FLOW
     #########################################################
 
     linear_task = train_ml_with_linear_regression()
+
     random_forest_task = train_ml_with_random_forest()
 
-    linear_task >> random_forest_task
+    verify_model_task = verify_random_forest_model()
+
+    linear_task >> random_forest_task >> verify_model_task
