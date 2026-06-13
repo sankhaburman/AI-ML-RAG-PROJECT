@@ -1,62 +1,65 @@
 import streamlit as st
 import requests
 
+# FastAPI endpoint
 API_URL = "http://127.0.0.1:8000/process"
+
+st.set_page_config(
+    page_title="Mutual Fund AI Advisor",
+    page_icon="📊",
+    layout="wide"
+)
 
 st.title("📊 Mutual Fund AI Advisor")
 st.subheader("📌 Portfolio + Query Based Advisor")
 
-# -----------------------------
+# --------------------------------------------------
 # PREDEFINED QUESTIONS
-# -----------------------------
+# --------------------------------------------------
 PREDEFINED_QUESTIONS = [
-    "Should I rebalance my portfolio?",
-    "Am I overexposed to a single fund?",
-    "Is my portfolio aligned with my risk profile?",
-    "How can I improve returns?",
-    "Should I switch to a safer allocation?",
-    "Custom question"
+    "Which holdings should be reduced or increased?"
 ]
 
-# -----------------------------
-# USER QUERY (DROPDOWN + CUSTOM)
-# -----------------------------
+# --------------------------------------------------
+# USER QUERY
+# --------------------------------------------------
 selected_question = st.selectbox(
     "Select a question",
     PREDEFINED_QUESTIONS,
     index=0
 )
 
-if selected_question == "Custom question":
-    question = st.text_input("Enter your question")
-else:
-    question = selected_question
+# Assign selected value to question
+question = selected_question
 
 st.markdown("---")
 
-# -----------------------------
+# --------------------------------------------------
 # PORTFOLIO INPUT
-# -----------------------------
+# --------------------------------------------------
 st.subheader("💼 Portfolio Details")
 
 fund_a = st.number_input(
-    "Fund A - Invested Amount",
+    "Edelweiss Liquid Fund - Regular Plan Annual - IDCW Option - Invested Amount",
     min_value=0,
     value=100000,
+    step=1000,
     key="fund_a"
 )
 
 fund_b = st.number_input(
-    "Fund B - Invested Amount",
+    "JM Liquid Fund (Direct) - Quarterly IDCW - Invested Amount",
     min_value=0,
     value=100000,
+    step=1000,
     key="fund_b"
 )
 
 fund_c = st.number_input(
-    "Fund C - Invested Amount",
+    "UTI Liquid Fund - Direct Plan - Half-Yearly IDCW - Invested Amount",
     min_value=0,
     value=100000,
+    step=1000,
     key="fund_c"
 )
 
@@ -68,25 +71,44 @@ risk_profile = st.selectbox(
 
 st.markdown("---")
 
-# -----------------------------
-# BUILD PAYLOAD
-# -----------------------------
+# --------------------------------------------------
+# BUILD PORTFOLIO OBJECT
+# --------------------------------------------------
 portfolio = {
     "funds": [
-        {"name": "Fund A", "amount": fund_a},
-        {"name": "Fund B", "amount": fund_b},
-        {"name": "Fund C", "amount": fund_c}
+        {
+            "name": "Edelweiss Liquid Fund - Regular Plan Annual - IDCW Option",
+            "amount": float(fund_a)
+        },
+        {
+            "name": "JM Liquid Fund (Direct) - Quarterly IDCW",
+            "amount": float(fund_b)
+        },
+        {
+            "name": "UTI Liquid Fund - Direct Plan - Half-Yearly IDCW",
+            "amount": float(fund_c)
+        }
     ],
     "risk_profile": risk_profile
 }
 
-# -----------------------------
+# --------------------------------------------------
+# DISPLAY PORTFOLIO SUMMARY
+# --------------------------------------------------
+total_investment = fund_a + fund_b + fund_c
+
+st.metric(
+    label="Total Portfolio Value",
+    value=f"₹{total_investment:,.0f}"
+)
+
+# --------------------------------------------------
 # SUBMIT BUTTON
-# -----------------------------
-if st.button("Analyze Portfolio"):
+# --------------------------------------------------
+if st.button("🚀 Analyze Portfolio", type="primary"):
 
     if not question:
-        st.error("Please enter a question before submitting.")
+        st.error("Please select a question before submitting.")
         st.stop()
 
     payload = {
@@ -95,15 +117,46 @@ if st.button("Analyze Portfolio"):
     }
 
     with st.spinner("Analyzing your portfolio..."):
+
         try:
-            response = requests.post(API_URL, json=payload, timeout=30)
+            response = requests.post(
+                API_URL,
+                json=payload,
+                timeout=60
+            )
+
             response.raise_for_status()
+
             result = response.json()
 
-            st.success("Analysis Complete")
+            st.success("✅ Analysis Complete")
 
-            st.subheader("📊 Result")
-            st.json(result)
+            st.subheader("📊 Analysis Result")
 
-        except requests.exceptions.RequestException as e:
-            st.error(f"API Error: {str(e)}")
+            if isinstance(result, dict):
+                st.json(result)
+            else:
+                st.write(result)
+
+        except requests.exceptions.ConnectionError:
+            st.error(
+                "❌ Could not connect to the API. "
+                "Make sure your FastAPI server is running on port 8000."
+            )
+
+        except requests.exceptions.Timeout:
+            st.error(
+                "❌ Request timed out. "
+                "The backend is taking too long to respond."
+            )
+
+        except requests.exceptions.HTTPError as e:
+            st.error(f"❌ HTTP Error: {e}")
+
+            try:
+                st.json(response.json())
+            except Exception:
+                st.text(response.text)
+
+        except Exception as e:
+            st.error(f"❌ Unexpected Error: {str(e)}")

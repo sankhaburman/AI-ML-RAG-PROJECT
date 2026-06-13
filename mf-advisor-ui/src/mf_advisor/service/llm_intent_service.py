@@ -1,26 +1,15 @@
 import json
 import logging
-import os
 
-from dotenv import load_dotenv
-from groq import Groq
+from mf_advisor.service.abstract_base_service import AbstractBaseService
 
 logging.basicConfig(level=logging.INFO)
 
 
-class LLMIntentService:
+class LLMIntentService(AbstractBaseService):
 
     def __init__(self):
-        load_dotenv()
-
-        api_key = os.getenv("GROQ_API_KEY")
-
-        if not api_key:
-            raise ValueError(
-                "GROQ_API_KEY not found. Check your .env file."
-            )
-
-        self.client = Groq(api_key=api_key)
+        super().__init__()
 
         self.intent_prompt = """
         You are an intent classification engine for a Mutual Fund Advisor application.
@@ -53,28 +42,31 @@ class LLMIntentService:
     def find_user_intent(self, question: str) -> str:
         try:
             logging.info(f"User question: {question}")
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+
+            content = self.invoke_llm(
+                system_prompt=self.intent_prompt,
+                user_prompt=question,
                 temperature=0,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": self.intent_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": question
-                    }
-                ]
+                json_response=True
             )
-            content = response.choices[0].message.content
+
             logging.info(f"LLM response: {content}")
+
             result = json.loads(content)
-            intent = result.get("intent", "UNKNOWN")
-            logging.info(f"Detected intent: {intent}")
+
+            intent = result.get(
+                "intent",
+                "UNKNOWN"
+            )
+
+            logging.info(
+                f"Detected intent: {intent}"
+            )
+
             return intent
 
         except Exception:
-            logging.exception("Intent detection failed")
+            logging.exception(
+                "Intent detection failed"
+            )
             return "UNKNOWN"
