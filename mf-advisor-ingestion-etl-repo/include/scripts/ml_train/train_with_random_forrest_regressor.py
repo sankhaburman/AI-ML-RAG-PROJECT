@@ -17,9 +17,16 @@ POSTGRES_DRIVER = "org.postgresql.Driver"
 MODEL_BASE_PATH = "/tmp/models"
 MODEL_PATH = "/tmp/models/random_forest.pkl"
 
+# =========================================================
+# CONFIG (4 MONTH MODEL)
+# =========================================================
+TRAINING_WINDOW_DAYS = 120
+PREDICTION_HORIZON_DAYS = 120
+
+TOTAL_LOOKBACK_DAYS = TRAINING_WINDOW_DAYS + PREDICTION_HORIZON_DAYS  # 240 days
 
 # =========================================================
-# SPARK SESSION
+# SPARK SESSION (LIGHT OPTIMIZED)
 # =========================================================
 def create_spark_session():
     return (
@@ -31,9 +38,9 @@ def create_spark_session():
         )
         .config("spark.executor.memory", "4g")
         .config("spark.driver.memory", "4g")
+        .config("spark.sql.shuffle.partitions", "100")
         .getOrCreate()
     )
-
 
 # =========================================================
 # POSTGRES CONNECTION
@@ -53,31 +60,48 @@ def get_postgres_connection():
         "password": conn.password
     }
 
-
 # =========================================================
-# LOAD DATA (LAST 60 DAYS)
+# OPTIMIZED SQL QUERY
 # =========================================================
 def load_training_dataframe(spark, connection):
-    query = """
+
+    query = f"""
     (
         SELECT
             scheme_code,
             nav_date,
             nav,
+
             daily_return_pct,
             weekly_return_pct,
             monthly_return_pct,
+
             rolling_return_30d_pct,
             rolling_return_90d_pct,
+
             moving_avg_7d,
             moving_avg_30d,
             moving_avg_90d,
             moving_avg_200d,
+
             cagr_percent,
             sharpe_ratio,
             annualized_volatility
+
         FROM mf_final_nav_enriched
-        WHERE nav_date >= CURRENT_DATE - INTERVAL '60 days'
+
+        WHERE nav_date >= CURRENT_DATE - INTERVAL '{TOTAL_LOOKBACK_DAYS} days'
+
+        AND nav IS NOT NULL
+        AND nav > 0
+
+        AND daily_return_pct IS NOT NULL
+        AND weekly_return_pct IS NOT NULL
+        AND monthly_return_pct IS NOT NULL
+
+        -- reduce useless rows early
+        AND moving_avg_30d IS NOT NULL
+        AND moving_avg_90d IS NOT NULL
     ) training_data
     """
 
@@ -88,10 +112,9 @@ def load_training_dataframe(spark, connection):
         .option("user", connection["user"])
         .option("password", connection["password"])
         .option("driver", POSTGRES_DRIVER)
-        .option("fetchsize", "1000")
+        .option("fetchsize", "2000")
         .load()
     )
-
 
 # =========================================================
 # FEATURE COLUMNS
@@ -112,54 +135,46 @@ def get_feature_columns():
         "annualized_volatility"
     ]
 
-
 # =========================================================
-# CREATE TARGET COLUMN USING PANDAS
+# TARGET (4 MONTH FUTURE NAV)
 # =========================================================
 def create_target_column(pdf):
-    pdf = pdf.sort_values(
-        ["scheme_code", "nav_date"]
-    ).copy()
+
+    pdf = pdf.sort_values(["scheme_code", "nav_date"]).copy()
 
     pdf["future_nav"] = (
         pdf.groupby("scheme_code")["nav"]
-        .shift(-30)
+        .shift(-PREDICTION_HORIZON_DAYS)
     )
 
-    pdf["target_30d_return"] = (
-                                       (
-                                               pdf["future_nav"] - pdf["nav"]
-                                       ) / pdf["nav"]
-                               ) * 100
+    pdf["target_future_nav"] = pdf["future_nav"]
 
     pdf = pdf[
-        (pdf["nav"] > 0)
-        & (pdf["target_30d_return"].notna())
+        (pdf["nav"] > 0) &
+        (pdf["target_future_nav"].notna())
         ]
 
     return pdf
 
-
 # =========================================================
-# PREPARE DATASET
+# DATASET PREP
 # =========================================================
 def prepare_dataset(pdf):
+
     feature_cols = get_feature_columns()
 
-    pdf = pdf.dropna(
-        subset=feature_cols + ["target_30d_return"]
-    )
+    pdf = pdf.dropna(subset=feature_cols + ["target_future_nav"])
 
     X = pdf[feature_cols]
-    y = pdf["target_30d_return"]
+    y = pdf["target_future_nav"]
 
     return X, y
 
-
 # =========================================================
-# TRAIN MODEL
+# MODEL TRAINING
 # =========================================================
 def train_model(X, y):
+
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
@@ -178,100 +193,65 @@ def train_model(X, y):
 
     model.fit(X_train, y_train)
 
-    train_score = model.score(X_train, y_train)
-    test_score = model.score(X_test, y_test)
-
-    logger.info(
-        f"Train R² Score: {train_score:.4f}"
-    )
-
-    logger.info(
-        f"Test R² Score: {test_score:.4f}"
-    )
+    logger.info(f"Train R² Score: {model.score(X_train, y_train):.4f}")
+    logger.info(f"Test R² Score: {model.score(X_test, y_test):.4f}")
 
     return model
 
-
 # =========================================================
-# SAVE MODEL AS PKL
+# SAVE MODEL
 # =========================================================
 def save_model(model):
-    os.makedirs(MODEL_BASE_PATH, exist_ok=True)
 
-    logger.info(
-        f"Saving model to {MODEL_PATH}"
-    )
+    os.makedirs(MODEL_BASE_PATH, exist_ok=True)
 
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(model, f)
 
-    logger.info(
-        f"Model saved successfully at {MODEL_PATH}"
-    )
-
+    logger.info(f"Model saved at {MODEL_PATH}")
 
 # =========================================================
-# TRAINING PIPELINE
+# PIPELINE
 # =========================================================
 def train_with_random_forest():
-    logger.info(
-        "Starting Random Forest Training..."
-    )
+
+    logger.info("Starting 4-month NAV prediction model...")
 
     spark = create_spark_session()
 
     try:
         connection = get_postgres_connection()
 
-        spark_df = load_training_dataframe(
-            spark,
-            connection
-        )
+        spark_df = load_training_dataframe(spark, connection)
 
-        logger.info(
-            f"Rows loaded: {spark_df.count()}"
-        )
+        logger.info(f"Rows loaded: {spark_df.count()}")
 
         pdf = spark_df.toPandas()
 
-        logger.info(
-            f"Converted to Pandas. Shape={pdf.shape}"
-        )
-
-        pdf["nav_date"] = pd.to_datetime(
-            pdf["nav_date"]
-        )
+        pdf["nav_date"] = pd.to_datetime(pdf["nav_date"])
 
         pdf = create_target_column(pdf)
 
-        logger.info(
-            f"Rows after target creation: {len(pdf)}"
-        )
+        logger.info(f"Rows after target creation: {len(pdf)}")
 
         X, y = prepare_dataset(pdf)
 
-        logger.info(
-            f"Training dataset shape: {X.shape}"
-        )
+        logger.info(f"Training shape: {X.shape}")
 
         model = train_model(X, y)
 
         save_model(model)
 
-        logger.info(
-            "Training completed successfully."
-        )
+        logger.info("Training completed successfully.")
 
     finally:
         spark.stop()
-
 
 # =========================================================
 # ENTRY POINT
 # =========================================================
 def main():
     train_with_random_forest()
-
 
 if __name__ == "__main__":
     main()
