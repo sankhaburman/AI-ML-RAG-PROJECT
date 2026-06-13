@@ -40,27 +40,43 @@ st.markdown("---")
 st.subheader("💼 Portfolio Details")
 
 fund_a = st.number_input(
-    "Edelweiss Liquid Fund - Regular Plan Annual - IDCW Option - Invested Amount",
+    "Nippon India Multi Cap Fund - Direct Plan Growth Plan - Growth Option - Invested Amount",
     min_value=0,
     value=100000,
-    step=1000,
+    step=5000,
     key="fund_a"
 )
 
 fund_b = st.number_input(
-    "JM Liquid Fund (Direct) - Quarterly IDCW - Invested Amount",
+    "Parag Parikh Flexi Cap Fund - Direct Plan - IDCW - Invested Amount",
     min_value=0,
-    value=100000,
-    step=1000,
+    value=500000,
+    step=5000,
     key="fund_b"
 )
 
 fund_c = st.number_input(
-    "UTI Liquid Fund - Direct Plan - Half-Yearly IDCW - Invested Amount",
+    "Quantum Multi Asset Active FOF - Direct Plan Growth Option - Invested Amount",
     min_value=0,
-    value=100000,
-    step=1000,
+    value=1000000,
+    step=5000,
     key="fund_c"
+)
+
+fund_d = st.number_input(
+    "Invesco India Large & Mid Cap Fund - Direct Plan - Growth - Invested Amount",
+    min_value=0,
+    value=700000,
+    step=5000,
+    key="fund_d"
+)
+
+fund_e = st.number_input(
+    "Bandhan Short Duration Fund - Direct Plan - Growth - Invested Amount",
+    min_value=0,
+    value=200000,
+    step=5000,
+    key="fund_e"
 )
 
 risk_profile = st.selectbox(
@@ -77,16 +93,24 @@ st.markdown("---")
 portfolio = {
     "funds": [
         {
-            "name": "Edelweiss Liquid Fund - Regular Plan Annual - IDCW Option",
+            "name": "Nippon India Multi Cap Fund - Direct Plan Growth Plan - Growth Option",
             "amount": float(fund_a)
         },
         {
-            "name": "JM Liquid Fund (Direct) - Quarterly IDCW",
+            "name": "Parag Parikh Flexi Cap Fund - Direct Plan - IDCW",
             "amount": float(fund_b)
         },
         {
-            "name": "UTI Liquid Fund - Direct Plan - Half-Yearly IDCW",
+            "name": "Quantum Multi Asset Active FOF - Direct Plan Growth Option",
             "amount": float(fund_c)
+        },
+        {
+            "name": "Invesco India Large & Mid Cap Fund - Direct Plan - Growth",
+            "amount": float(fund_d)
+        },
+        {
+            "name": "Bandhan Short Duration Fund - Direct Plan - Growth",
+            "amount": float(fund_e)
         }
     ],
     "risk_profile": risk_profile
@@ -95,7 +119,7 @@ portfolio = {
 # --------------------------------------------------
 # DISPLAY PORTFOLIO SUMMARY
 # --------------------------------------------------
-total_investment = fund_a + fund_b + fund_c
+total_investment = fund_a + fund_b + fund_c + fund_d + fund_e
 
 st.metric(
     label="Total Portfolio Value",
@@ -117,27 +141,20 @@ if st.button("🚀 Analyze Portfolio", type="primary"):
     }
 
     with st.spinner("Analyzing your portfolio..."):
-
         try:
             response = requests.post(
                 API_URL,
                 json=payload,
-                timeout=60
+                timeout=300
             )
-
             response.raise_for_status()
-
             result = response.json()
-
             st.success("✅ Analysis Complete")
-
             st.subheader("📊 Analysis Result")
-
             if isinstance(result, dict):
                 st.json(result)
             else:
                 st.write(result)
-
         except requests.exceptions.ConnectionError:
             st.error(
                 "❌ Could not connect to the API. "
