@@ -1,91 +1,60 @@
-import os
+import logging
 from abc import ABC
+import os
 
-import psycopg2
 from dotenv import load_dotenv
 from groq import Groq
 from pyspark.sql import SparkSession
 
+load_dotenv()
+APP_NAME = "MF-ADVISOR"
+logging.basicConfig(level=logging.INFO)
 
 class AbstractBaseService(ABC):
 
     _spark_session = None
 
     def __init__(self):
-        load_dotenv()
-        self._initialize_groq()
         self._initialize_database()
+        self._initialize_groq()
+
+    def _initialize_database(self):
+        self._connection = {
+            "host": os.getenv("POSTGRES_HOST"),
+            "port": int(os.getenv("POSTGRES_PORT", 5432)),
+            "database": os.getenv("POSTGRES_DB"),
+            "user": os.getenv("POSTGRES_USER"),
+            "password": os.getenv("POSTGRES_PASSWORD")
+        }
 
     def _initialize_groq(self):
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError(
-                "GROQ_API_KEY not found in .env"
+                "GROQ_API_KEY not configured"
             )
-        self.client = Groq(api_key=api_key)
-
-    def _initialize_database(self):
-        self.connection = psycopg2.connect(
-            host=os.getenv("AURORA_HOST"),
-            port=os.getenv("AURORA_PORT", "5432"),
-            dbname=os.getenv("AURORA_DATABASE"),
-            user=os.getenv("AURORA_USERNAME"),
-            password=os.getenv("AURORA_PASSWORD")
+        self._groq_client = Groq(
+            api_key=api_key
         )
 
     @property
-    def spark(self):
-        if AbstractBaseService._spark_session is None:
-            AbstractBaseService._spark_session = (
-                SparkSession.builder
-                .appName("MF Advisor")
-                .config(
-                    "spark.jars.packages",
-                    "org.postgresql:postgresql:42.7.3"
-                )
-                .config(
-                    "spark.executor.memory",
-                    "4g"
-                )
-                .config(
-                    "spark.driver.memory",
-                    "4g"
-                )
-                .getOrCreate()
-            )
+    def connection(self):
+        return self._connection
 
-        return AbstractBaseService._spark_session
+    @property
+    def groq_client(self):
+        return self._groq_client
 
-    def execute_query(self,query,params=None):
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, params)
-            if cursor.description:
-                columns = [
-                    desc[0]
-                    for desc in cursor.description
-                ]
-                rows = cursor.fetchall()
-                return [
-                    dict(zip(columns, row))
-                    for row in rows
-                ]
-            self.connection.commit()
-            return []
-        finally:
-            cursor.close()
-
-
-    def close(self):
-        if self.connection:
-            self.connection.close()
-
-
-    def invoke_llm(self, system_prompt: str, user_prompt: str, model: str = "llama-3.3-70b-versatile",temperature: float = 0,json_response: bool = False):
-        payload = {
-            "model": model,
-            "temperature": temperature,
-            "messages": [
+    def invoke_llm(self, system_prompt,user_prompt,temperature=0,json_response=False):
+        response = self.groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            temperature=temperature,
+            response_format=(
+                {"type": "json_object"}
+                if json_response
+                else None
+            ),
+            messages=[
                 {
                     "role": "system",
                     "content": system_prompt
@@ -95,14 +64,25 @@ class AbstractBaseService(ABC):
                     "content": user_prompt
                 }
             ]
-        }
-
-        if json_response:
-            payload["response_format"] = {
-                "type": "json_object"
-            }
-
-        response = self.client.chat.completions.create(
-            **payload
         )
         return response.choices[0].message.content
+
+    @classmethod
+    def get_spark_session(cls):
+        os.environ["HADOOP_HOME"] = r"D:\software\hadoop"
+        os.environ["hadoop.home.dir"] = r"D:\software\hadoop"
+        if cls._spark_session is None:
+            cls._spark_session = (
+                SparkSession.builder
+                .appName(APP_NAME)
+                .config(
+                    "spark.jars.packages",
+                    "org.postgresql:postgresql:42.7.3"
+                )
+                .getOrCreate()
+            )
+        return cls._spark_session
+
+    @property
+    def spark(self):
+        return self.get_spark_session()
