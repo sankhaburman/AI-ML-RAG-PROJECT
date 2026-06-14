@@ -1,13 +1,18 @@
 import logging
 import os
 import pickle
+import json
 
 from airflow.hooks.base import BaseHook
 from pyspark.sql import SparkSession
 
 import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
+import joblib
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +21,8 @@ POSTGRES_DRIVER = "org.postgresql.Driver"
 
 MODEL_BASE_PATH = "/tmp/models"
 MODEL_PATH = "/tmp/models/random_forest.pkl"
+SCALER_PATH = "/tmp/models/scaler.pkl"
+METADATA_PATH = "/tmp/models/model_metadata.json"
 
 # =========================================================
 # CONFIG (4 MONTH MODEL)
@@ -98,6 +105,12 @@ def load_training_dataframe(spark, connection):
         AND daily_return_pct IS NOT NULL
         AND weekly_return_pct IS NOT NULL
         AND monthly_return_pct IS NOT NULL
+        AND rolling_return_30d_pct IS NOT NULL
+        AND rolling_return_90d_pct IS NOT NULL
+        AND moving_avg_7d IS NOT NULL
+        AND moving_avg_30d IS NOT NULL
+        AND sharpe_ratio IS NOT NULL
+        AND annualized_volatility IS NOT NULL
 
         -- reduce useless rows early
         AND moving_avg_30d IS NOT NULL
@@ -175,40 +188,143 @@ def prepare_dataset(pdf):
 # =========================================================
 def train_model(X, y):
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
+    # Split into train/validation/test (60/20/20)
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y,
         test_size=0.2,
         random_state=42
     )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp,
+        test_size=0.25,
+        random_state=42
+    )
 
+    # Feature scaling
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Regularization to prevent overfitting
     model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
+        n_estimators=150,           # Reduced from 200
+        max_depth=8,                # Reduced from 10
+        min_samples_split=10,       # Increased from 5 (more restrictive)
+        min_samples_leaf=5,         # Increased from 2
+        max_features='sqrt',        # Limit feature sampling per split
+        max_samples=0.8,            # Use 80% of samples per tree
         n_jobs=-1,
         random_state=42
     )
 
-    model.fit(X_train, y_train)
+    model.fit(X_train_scaled, y_train)
 
-    logger.info(f"Train R² Score: {model.score(X_train, y_train):.4f}")
-    logger.info(f"Test R² Score: {model.score(X_test, y_test):.4f}")
+    # Predictions on all sets
+    y_pred_train = model.predict(X_train_scaled)
+    y_pred_val = model.predict(X_val_scaled)
+    y_pred_test = model.predict(X_test_scaled)
 
-    return model
+    # Comprehensive metrics
+    train_r2 = r2_score(y_train, y_pred_train)
+    val_r2 = r2_score(y_val, y_pred_val)
+    test_r2 = r2_score(y_test, y_pred_test)
+
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+    val_rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+    test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+
+    train_mae = mean_absolute_error(y_train, y_pred_train)
+    val_mae = mean_absolute_error(y_val, y_pred_val)
+    test_mae = mean_absolute_error(y_test, y_pred_test)
+
+    # Overfitting detection
+    rmse_gap = test_rmse - train_rmse
+    r2_gap = train_r2 - test_r2
+
+    logger.info("\n" + "="*60)
+    logger.info("TRAINING METRICS")
+    logger.info("="*60)
+    logger.info(f"Train R² Score: {train_r2:.4f}")
+    logger.info(f"Validation R² Score: {val_r2:.4f}")
+    logger.info(f"Test R² Score: {test_r2:.4f}")
+    logger.info(f"\nTrain RMSE: {train_rmse:.4f}")
+    logger.info(f"Validation RMSE: {val_rmse:.4f}")
+    logger.info(f"Test RMSE: {test_rmse:.4f}")
+    logger.info(f"\nTrain MAE: {train_mae:.4f}")
+    logger.info(f"Validation MAE: {val_mae:.4f}")
+    logger.info(f"Test MAE: {test_mae:.4f}")
+    logger.info("\n" + "="*60)
+    logger.info("OVERFITTING ANALYSIS")
+    logger.info("="*60)
+    logger.info(f"RMSE Gap (Test - Train): {rmse_gap:.4f}")
+    logger.info(f"R² Gap (Train - Test): {r2_gap:.6f}")
+    if rmse_gap > 10:
+        logger.warning("⚠️ HIGH OVERFITTING DETECTED: Large RMSE gap!")
+    elif r2_gap > 0.01:
+        logger.warning("⚠️ MODERATE OVERFITTING: R² gap significant")
+    else:
+        logger.info("✓ Good generalization: Train/test metrics close")
+    logger.info("="*60 + "\n")
+
+    # Cross-validation
+    cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=5, scoring='r2')
+    logger.info(f"Cross-validation R² Scores: {cv_scores}")
+    logger.info(f"Cross-validation Mean R²: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': X_train.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+
+    logger.info(f"\nTop 5 Important Features:\n{feature_importance.head()}")
+
+    metrics = {
+        "train_r2": float(train_r2),
+        "val_r2": float(val_r2),
+        "test_r2": float(test_r2),
+        "train_rmse": float(train_rmse),
+        "val_rmse": float(val_rmse),
+        "test_rmse": float(test_rmse),
+        "train_mae": float(train_mae),
+        "val_mae": float(val_mae),
+        "test_mae": float(test_mae),
+        "rmse_gap": float(rmse_gap),
+        "r2_gap": float(r2_gap),
+        "cv_mean_r2": float(cv_scores.mean()),
+        "cv_std_r2": float(cv_scores.std())
+    }
+
+    return model, scaler, metrics, feature_importance
 
 # =========================================================
 # SAVE MODEL
 # =========================================================
-def save_model(model):
+def save_model(model, scaler, metrics, feature_importance):
 
     os.makedirs(MODEL_BASE_PATH, exist_ok=True)
 
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(model, f)
 
+    joblib.dump(scaler, SCALER_PATH)
+
+    metadata = {
+        "model_type": "RandomForestRegressor",
+        "metrics": metrics,
+        "feature_importance": feature_importance.to_dict(orient='records'),
+        "features": get_feature_columns(),
+        "prediction_horizon_days": PREDICTION_HORIZON_DAYS,
+        "training_window_days": TRAINING_WINDOW_DAYS
+    }
+
+    with open(METADATA_PATH, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
     logger.info(f"Model saved at {MODEL_PATH}")
+    logger.info(f"Scaler saved at {SCALER_PATH}")
+    logger.info(f"Metadata saved at {METADATA_PATH}")
 
 # =========================================================
 # PIPELINE
@@ -238,9 +354,9 @@ def train_with_random_forest():
 
         logger.info(f"Training shape: {X.shape}")
 
-        model = train_model(X, y)
+        model, scaler, metrics, feature_importance = train_model(X, y)
 
-        save_model(model)
+        save_model(model, scaler, metrics, feature_importance)
 
         logger.info("Training completed successfully.")
 

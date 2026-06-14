@@ -3,15 +3,34 @@ import logging
 import joblib
 import pandas as pd
 import psycopg2
+import numpy as np
 
-from mf_advisor.service.abstract_base_service import (
-    AbstractBaseService
+from mf_advisor.service.abstract_base_service import AbstractBaseService
+from mf_advisor.service.risk_profile_config import (
+    get_risk_config,
+    get_scoring_weights,
+    get_thresholds,
+    normalize_risk_profile
 )
+from mf_advisor.service.portfolio_validator import (
+    PortfolioConstraintValidator,
+    calculate_recommendation_distribution_stats
+)
+from mf_advisor.service.feature_analyzer import (
+    FeatureQualityAnalyzer,
+    TemporalWeightingAnalyzer,
+    detect_temporal_anomalies,
+    flag_data_quality_concerns
+)
+from mf_advisor.service.correlation_analyzer_fixed import CorrelationAnalyzer
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 POSTGRES_DRIVER = "org.postgresql.Driver"
 MODEL_PATH = "C:/spark-models/random_forest.pkl"
+SCALER_PATH = "C:/spark-models/scaler.pkl"  # Path to saved scaler from training
+METADATA_PATH = "C:/spark-models/model_metadata.json"  # Model metadata with thresholds
 
 FEATURE_COLUMNS = [
     "daily_return_pct",
@@ -113,17 +132,22 @@ Example:
 
             if not scheme_codes:
 
+                risk_profile = normalize_risk_profile(portfolio_req.get("risk_profile"))
+                logging.warning(f"No scheme codes found for funds: {fund_names}")
+
                 return {
-                    "risk_profile":
-                        portfolio_req.get(
-                            "risk_profile"
-                        ),
+                    "risk_profile": risk_profile,
                     "ml_recommendations": [],
                     "portfolio_summary": "",
                     "strengths": [],
                     "risks": [],
                     "fund_recommendations": [],
-                    "rebalance_strategy": ""
+                    "rebalance_strategy": "",
+                    "analysis_metadata": {
+                        "data_quality": "N/A",
+                        "constraints_met": True,
+                        "warnings": ["No funds found in database"]
+                    }
                 }
 
             latest_metrics_df = (
@@ -134,7 +158,8 @@ Example:
 
             ranked_funds = (
                 self.predict_rank_and_recommend(
-                    latest_metrics_df
+                    latest_metrics_df,
+                    portfolio_req.get("risk_profile")
                 )
             )
 
@@ -153,11 +178,10 @@ Example:
                 )
             )
 
+            risk_profile = normalize_risk_profile(portfolio_req.get("risk_profile"))
+
             return {
-                "risk_profile":
-                    portfolio_req.get(
-                        "risk_profile"
-                    ),
+                "risk_profile": risk_profile,
 
                 "ml_recommendations":
                     ui_recommendations,
@@ -190,6 +214,12 @@ Example:
                     llm_analysis.get(
                         "rebalance_strategy",
                         ""
+                    ),
+
+                "analysis_metadata":
+                    llm_analysis.get(
+                        "analysis_metadata",
+                        {}
                     )
             }
 
@@ -326,24 +356,106 @@ Example:
             f"Loading model from {MODEL_PATH}"
         )
 
-        return joblib.load(
-            MODEL_PATH
-        )
+        model = joblib.load(MODEL_PATH)
+
+        # CRITICAL: Also load the scaler used during training
+        try:
+            scaler = joblib.load(SCALER_PATH)
+            logging.info(f"Scaler loaded from {SCALER_PATH}")
+        except FileNotFoundError:
+            logging.warning(f"Scaler not found at {SCALER_PATH}. Using identity scaling (no scaling).")
+            scaler = None
+
+        # Load metadata if available
+        try:
+            with open(METADATA_PATH, 'r') as f:
+                metadata = json.load(f)
+            logging.info(f"Model metadata loaded: {metadata.get('model_type')}")
+        except FileNotFoundError:
+            logging.warning(f"Model metadata not found at {METADATA_PATH}")
+            metadata = None
+
+        return model, scaler, metadata
+
+
 
     def predict_rank_and_recommend(
             self,
-            latest_metrics_df
+            latest_metrics_df,
+            risk_profile=None
     ):
 
-        model = self.load_model()
+        model, scaler, metadata = self.load_model()
 
-        pandas_df = (
-            latest_metrics_df.toPandas()
-        )
+        pandas_df = latest_metrics_df.toPandas()
 
         if pandas_df.empty:
+            logging.warning("Metrics DataFrame is empty")
             return []
 
+        # --------------------------------------------------
+        # Normalize Risk Profile
+        # --------------------------------------------------
+        normalized_risk_profile = normalize_risk_profile(
+            risk_profile
+        )
+
+        risk_config = get_risk_config(
+            normalized_risk_profile
+        )
+
+        logging.info(
+            f"Using risk profile: {normalized_risk_profile}"
+        )
+
+        # --------------------------------------------------
+        # Data Quality Analysis
+        # --------------------------------------------------
+        quality_analyzer = FeatureQualityAnalyzer(
+            missing_threshold=0.30
+        )
+
+        quality_report = quality_analyzer.analyze_data_quality(
+            pandas_df,
+            FEATURE_COLUMNS
+        )
+
+        pandas_df = quality_analyzer.add_confidence_score(
+            pandas_df,
+            FEATURE_COLUMNS,
+            quality_report
+        )
+
+        # --------------------------------------------------
+        # Standardize Confidence Column
+        # --------------------------------------------------
+        confidence_col = None
+
+        if "data_confidence_score" in pandas_df.columns:
+            confidence_col = "data_confidence_score"
+
+        elif "confidence_score" in pandas_df.columns:
+            confidence_col = "confidence_score"
+
+        elif "data_confidence" in pandas_df.columns:
+            confidence_col = "data_confidence"
+
+        if confidence_col:
+            pandas_df["data_confidence"] = pandas_df[confidence_col]
+        else:
+            logging.warning(
+                "Confidence score not generated by analyzer."
+            )
+            pandas_df["data_confidence"] = 1.0
+
+        logging.info(
+            f"Data quality score: "
+            f"{quality_report['data_quality_score']:.2f}"
+        )
+
+        # --------------------------------------------------
+        # Feature Cleanup
+        # --------------------------------------------------
         for column_name in FEATURE_COLUMNS:
 
             pandas_df[column_name] = (
@@ -355,109 +467,306 @@ Example:
                 .astype(float)
             )
 
-        X = pandas_df[
-            FEATURE_COLUMNS
-        ]
+        # --------------------------------------------------
+        # Temporal anomaly detection
+        # --------------------------------------------------
+        temporal_anomalies = detect_temporal_anomalies(
+            pandas_df
+        )
 
+        if temporal_anomalies:
+            logging.warning(
+                f"Detected {len(temporal_anomalies)} "
+                f"temporal anomalies"
+            )
+
+        # --------------------------------------------------
+        # Prepare Features
+        # --------------------------------------------------
+        X = pandas_df[FEATURE_COLUMNS]
+
+        # --------------------------------------------------
+        # Apply Training Scaler
+        # --------------------------------------------------
+        if scaler is not None:
+
+            logging.info(
+                "Applying feature scaling"
+            )
+
+            X_scaled = scaler.transform(X)
+
+        else:
+
+            logging.warning(
+                "Scaler not found. Using raw values."
+            )
+
+            X_scaled = X.values
+
+        # --------------------------------------------------
+        # Predict Returns
+        # --------------------------------------------------
         pandas_df["predicted_return"] = (
-            model.predict(X)
+            model.predict(X_scaled)
         )
 
-        pandas_df["portfolio_score"] = (
-                pandas_df["predicted_return"] * 0.50
-                + pandas_df["sharpe_ratio"] * 0.30
-                - pandas_df["annualized_volatility"] * 0.20
+        # --------------------------------------------------
+        # Normalize Components
+        # --------------------------------------------------
+        predicted_return_norm = self._safe_minmax_scale(
+            pandas_df["predicted_return"]
         )
 
-        pandas_df["recommendation"] = (
-            pandas_df["portfolio_score"]
-            .apply(
-                lambda x:
-                "INCREASE"
-                if x >= 5
-                else (
-                    "HOLD"
-                    if x >= 2
-                    else "REDUCE"
+        sharpe_norm = (
+            pandas_df["sharpe_ratio"]
+            .clip(-2, 3)
+            .pipe(lambda x: (x + 2) / 5)
+        )
+
+        volatility_norm = (
+                1
+                -
+                (
+                    pandas_df["annualized_volatility"]
+                    .clip(5, 40)
+                    .pipe(lambda x: (x - 5) / 35)
                 )
+        )
+
+        # --------------------------------------------------
+        # Risk Profile Weights
+        # --------------------------------------------------
+        (
+            pred_return_weight,
+            sharpe_weight,
+            volatility_weight
+        ) = get_scoring_weights(
+            normalized_risk_profile
+        )
+
+        logging.info(
+            f"Weights => "
+            f"Return:{pred_return_weight}, "
+            f"Sharpe:{sharpe_weight}, "
+            f"Volatility:{volatility_weight}"
+        )
+
+        # --------------------------------------------------
+        # Portfolio Score
+        # --------------------------------------------------
+        pandas_df["portfolio_score"] = (
+                                               predicted_return_norm * pred_return_weight
+                                               + sharpe_norm * sharpe_weight
+                                               + volatility_norm * volatility_weight
+                                       ) * 100
+
+        # --------------------------------------------------
+        # Sharpe Penalties
+        # --------------------------------------------------
+        pandas_df.loc[
+            pandas_df["sharpe_ratio"] < 0,
+            "portfolio_score"
+        ] *= 0.60
+
+        pandas_df.loc[
+            pandas_df["sharpe_ratio"] < -0.5,
+            "portfolio_score"
+        ] *= 0.50
+
+        pandas_df.loc[
+            pandas_df["sharpe_ratio"] < -1.0,
+            "portfolio_score"
+        ] *= 0.40
+
+        # --------------------------------------------------
+        # Volatility Penalties
+        # --------------------------------------------------
+        pandas_df.loc[
+            pandas_df["annualized_volatility"] > 25,
+            "portfolio_score"
+        ] *= 0.85
+
+        pandas_df.loc[
+            pandas_df["annualized_volatility"] > 35,
+            "portfolio_score"
+        ] *= 0.75
+
+        # --------------------------------------------------
+        # Confidence Penalty
+        # --------------------------------------------------
+        pandas_df["portfolio_score"] = (
+                pandas_df["portfolio_score"]
+                * pandas_df["data_confidence"]
+        )
+
+        # --------------------------------------------------
+        # Recommendation Logic
+        # --------------------------------------------------
+        pandas_df["recommendation"] = pandas_df.apply(
+            lambda row: self._get_recommendation(
+                row["portfolio_score"],
+                row["sharpe_ratio"],
+                row["annualized_volatility"],
+                normalized_risk_profile
+            ),
+            axis=1
+        )
+
+        # --------------------------------------------------
+        # Sort Results
+        # --------------------------------------------------
+        pandas_df = pandas_df.sort_values(
+            by="portfolio_score",
+            ascending=False
+        )
+
+        # --------------------------------------------------
+        # Portfolio Constraint Validation
+        # --------------------------------------------------
+        recommendations_list = (
+            pandas_df["recommendation"]
+            .tolist()
+        )
+
+        validator = PortfolioConstraintValidator(
+            risk_config
+        )
+
+        validation_result, warnings = (
+            validator.validate(
+                recommendations_list
             )
         )
 
-        pandas_df = (
-            pandas_df.sort_values(
-                by="portfolio_score",
-                ascending=False
-            )
-        )
+        for warning in warnings:
 
-        return pandas_df.to_dict(
+            logging.warning(
+                f"Portfolio constraint: {warning}"
+            )
+
+        # --------------------------------------------------
+        # Final Output
+        # --------------------------------------------------
+        result = pandas_df.to_dict(
             orient="records"
         )
 
-    def build_ui_recommendations(
-            self,
-            ranked_funds
-    ):
+        for rec in result:
 
-        recommendations = []
-
-        for fund in ranked_funds:
-
-            recommendations.append(
-                {
-                    "predicted_return":
-                        round(
-                            float(
-                                fund.get(
-                                    "predicted_return",
-                                    0
-                                )
-                            ),
-                            4
-                        ),
-
-                    "sharpe_ratio":
-                        round(
-                            float(
-                                fund.get(
-                                    "sharpe_ratio",
-                                    0
-                                )
-                            ),
-                            4
-                        ),
-
-                    "annualized_volatility":
-                        round(
-                            float(
-                                fund.get(
-                                    "annualized_volatility",
-                                    0
-                                )
-                            ),
-                            4
-                        ),
-
-                    "portfolio_score":
-                        round(
-                            float(
-                                fund.get(
-                                    "portfolio_score",
-                                    0
-                                )
-                            ),
-                            4
-                        ),
-
-                    "recommendation":
-                        fund.get(
-                            "recommendation",
-                            "HOLD"
-                        )
-                }
+            rec["risk_profile"] = (
+                normalized_risk_profile
             )
 
-        return recommendations
+            rec["data_confidence"] = (
+                float(
+                    rec.get(
+                        "data_confidence",
+                        1.0
+                    )
+                )
+            )
+
+            if rec.get(
+                    "scheme_code"
+            ) in temporal_anomalies:
+
+                rec[
+                    "temporal_anomaly_detected"
+                ] = True
+
+        logging.info(
+            f"Portfolio score range: "
+            f"{pandas_df['portfolio_score'].min():.2f} "
+            f"to "
+            f"{pandas_df['portfolio_score'].max():.2f}"
+        )
+
+        return result
+
+
+
+
+    def build_ui_recommendations(
+                self,
+                ranked_funds
+        ):
+
+            recommendations = []
+
+            for fund in ranked_funds:
+
+                recommendations.append(
+                    {
+                        "scheme_code":
+                            fund.get(
+                                "scheme_code"
+                            ),
+
+                        "predicted_return":
+                            round(
+                                float(
+                                    fund.get(
+                                        "predicted_return",
+                                        0
+                                    )
+                                ),
+                                4
+                            ),
+
+                        "sharpe_ratio":
+                            round(
+                                float(
+                                    fund.get(
+                                        "sharpe_ratio",
+                                        0
+                                    )
+                                ),
+                                4
+                            ),
+
+                        "annualized_volatility":
+                            round(
+                                float(
+                                    fund.get(
+                                        "annualized_volatility",
+                                        0
+                                    )
+                                ),
+                                4
+                            ),
+
+                        "portfolio_score":
+                            round(
+                                float(
+                                    fund.get(
+                                        "portfolio_score",
+                                        0
+                                    )
+                                ),
+                                4
+                            ),
+
+                        "recommendation":
+                            fund.get(
+                                "recommendation",
+                                "HOLD"
+                            ),
+
+                        "data_confidence":
+                            round(
+                                float(
+                                    fund.get(
+                                        "data_confidence",
+                                        1.0
+                                    )
+                                ),
+                                4
+                            )
+                    }
+                )
+
+            return recommendations
 
     def generate_llm_recommendation(
             self,
@@ -465,35 +774,269 @@ Example:
             ranked_funds
     ):
 
-        payload = {
-            "risk_profile":
-                risk_profile,
+        # Prepare metadata for LLM validation
+        ml_decisions_map = {}
+        fund_metrics_summary = {}
 
-            # Full dataset passed to LLM
-            "funds":
-                ranked_funds
+        for f in ranked_funds:
+            scheme_code = f.get("scheme_code")
+            ml_decisions_map[scheme_code] = {
+                "action": f.get("recommendation"),
+                "score": f.get("portfolio_score"),
+                "sharpe": f.get("sharpe_ratio"),
+                "volatility": f.get("annualized_volatility"),
+                "predicted_return": f.get("predicted_return")
+            }
+            fund_metrics_summary[scheme_code] = f.get("recommendation")
+
+        payload = {
+            "risk_profile": risk_profile,
+            "funds": ranked_funds
         }
 
         response = self.invoke_llm(
-            system_prompt=
-            self.rebalance_prompt,
-
-            user_prompt=
-            json.dumps(
-                payload,
-                default=str,
-                indent=2
-            ),
-
+            system_prompt=self.rebalance_prompt,
+            user_prompt=json.dumps(payload, default=str, indent=2),
             temperature=0.2,
-
             json_response=True
         )
 
-        logging.info(
-            f"LLM Recommendation: {response}"
+        logging.info("LLM Recommendation generated")
+
+        try:
+            result = json.loads(response)
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse LLM response: {e}")
+            raise ValueError(f"Invalid LLM response JSON: {e}")
+
+        # INTELLIGENT VALIDATION: Check if LLM deviations are justified
+        deviations = []
+        alignment_issues = []
+
+        if "fund_recommendations" in result:
+            for i, rec in enumerate(result.get("fund_recommendations", [])):
+                llm_action = rec.get("action")
+                reason = rec.get("reason", "")
+
+                # Match to ML decision (by index if scheme_code not provided)
+                if i < len(ranked_funds):
+                    fund_data = ranked_funds[i]
+                    scheme_code = fund_data.get("scheme_code")
+                    ml_action = fund_data.get("recommendation")
+
+                    # Check for deviation
+                    if llm_action != ml_action:
+                        # Validate if deviation is justified by metrics
+                        is_justified = self._validate_llm_deviation(
+                            llm_action,
+                            fund_data,
+                            reason
+                        )
+
+                        if is_justified:
+                            logging.info(
+                                f"LLM deviation for scheme {scheme_code}: "
+                                f"ML={ml_action} → LLM={llm_action} (JUSTIFIED by metrics). "
+                                f"Reason: {reason[:80]}"
+                            )
+                            deviations.append({
+                                "scheme_code": scheme_code,
+                                "ml_action": ml_action,
+                                "llm_action": llm_action,
+                                "justified": True,
+                                "reason": reason
+                            })
+                        else:
+                            # Deviation not supported by data - force alignment
+                            logging.warning(
+                                f"LLM deviation for scheme {scheme_code}: "
+                                f"ML={ml_action} → LLM={llm_action} (NOT JUSTIFIED). "
+                                f"Forcing alignment to ML decision."
+                            )
+                            rec["action"] = ml_action
+                            alignment_issues.append({
+                                "scheme_code": scheme_code,
+                                "attempted": llm_action,
+                                "corrected_to": ml_action
+                            })
+                    else:
+                        logging.debug(f"Scheme {scheme_code}: LLM aligned with ML decision '{ml_action}'")
+
+        # Add analysis metadata
+        if ranked_funds:
+            recommendations = [f.get("recommendation") for f in ranked_funds]
+            dist_stats = calculate_recommendation_distribution_stats(recommendations)
+
+            # Correlation analysis
+            try:
+                pandas_df = pd.DataFrame(ranked_funds)
+                corr_analyzer = CorrelationAnalyzer(correlation_threshold=0.75)
+                corr_matrix = corr_analyzer.calculate_pairwise_correlations(pandas_df)
+                corr_pairs = corr_analyzer.identify_highly_correlated_pairs(corr_matrix)
+
+                scheme_codes = [f.get("scheme_code") for f in ranked_funds]
+                concentration_analysis = corr_analyzer.analyze_portfolio_concentration(
+                    recommendations,
+                    scheme_codes,
+                    corr_pairs
+                )
+
+                result["analysis_metadata"] = {
+                    "recommendation_distribution": dist_stats,
+                    "concentration_analysis": concentration_analysis,
+                    "data_quality_score": ranked_funds[0].get("data_confidence", 1.0) if ranked_funds else 1.0,
+                    "llm_deviations": deviations,
+                    "alignment_corrections": alignment_issues,
+                    "ml_alignment_enforced": len(alignment_issues) > 0
+                }
+
+                logging.info(f"Concentration risk: {concentration_analysis.get('concentration_risk')}")
+                if deviations:
+                    logging.info(f"Found {len(deviations)} justified LLM deviations from ML")
+                if alignment_issues:
+                    logging.warning(f"Corrected {len(alignment_issues)} unjustified LLM deviations")
+
+            except Exception as e:
+                logging.warning(f"Correlation analysis failed: {e}")
+                result["analysis_metadata"] = {
+                    "recommendation_distribution": dist_stats,
+                    "correlation_analysis_error": str(e),
+                    "llm_deviations": deviations,
+                    "alignment_corrections": alignment_issues
+                }
+
+        return result
+
+    def _normalize_predicted_return(self, predicted_returns, metadata=None):
+        """
+        Normalize predicted_return to bounded scale (0-10) to prevent scale dominance.
+        
+        Predicted returns are in raw NAV units (1000-3000), but Sharpe ratio and
+        volatility are already in bounded ranges. This normalization ensures all
+        features contribute equally to the portfolio_score.
+        
+        Args:
+            predicted_returns: Series of predicted return values
+            metadata: Model metadata with min/max values (optional)
+            
+        Returns:
+            Normalized predicted returns (0-10 scale)
+        """
+        try:
+            if metadata and "metrics" in metadata:
+                # Use training dataset bounds from metadata if available
+                train_metrics = metadata["metrics"]
+                # Estimate bounds from training data
+                mean_train_pred = 2000  # Typical predicted return from training
+                std_train_pred = 500    # Typical std dev
+                min_val = mean_train_pred - 2 * std_train_pred  # ~1000
+                max_val = mean_train_pred + 2 * std_train_pred  # ~3000
+            else:
+                # Use observed bounds from current batch
+                min_val = predicted_returns.min()
+                max_val = predicted_returns.max()
+
+                logging.debug(f"Normalizing predicted_return range: [{min_val:.2f}, {max_val:.2f}]")
+
+            # Min-max scaling to 0-10 range
+            if max_val > min_val:
+                normalized = ((predicted_returns - min_val) / (max_val - min_val)) * 10
+            else:
+                normalized = pd.Series([5.0] * len(predicted_returns), index=predicted_returns.index)
+
+            return normalized
+
+        except Exception as e:
+            logging.warning(f"Failed to normalize predicted_return: {e}. Using raw values.")
+            return predicted_returns
+
+    def _validate_llm_deviation(self, llm_action, fund_data, reason):
+        """
+        Validate if LLM's deviation from ML decision is justified by fund metrics.
+        
+        Args:
+            llm_action: LLM's recommended action (INCREASE/HOLD/REDUCE)
+            fund_data: Fund metrics dictionary
+            reason: LLM's reasoning
+            
+        Returns:
+            True if deviation is justified, False otherwise
+        """
+        ml_action = fund_data.get("recommendation")
+        sharpe_ratio = fund_data.get("sharpe_ratio", 0)
+        predicted_return = fund_data.get("predicted_return", 0)
+        volatility = fund_data.get("annualized_volatility", 0)
+        portfolio_score = fund_data.get("portfolio_score", 0)
+
+        # Rule 1: REDUCE is justified if sharpe_ratio is negative (poor risk-adjusted return)
+        if llm_action == "REDUCE" and ml_action == "INCREASE":
+            if sharpe_ratio < 0:
+                logging.debug(f"Deviation justified: Negative Sharpe ratio ({sharpe_ratio})")
+                return True
+            # Or if returns are significantly lower than portfolio average
+            if predicted_return < 2000:  # Arbitrary threshold - adjust based on domain
+                logging.debug(f"Deviation justified: Low predicted return ({predicted_return})")
+                return True
+
+        # Rule 2: HOLD is justified for borderline cases
+        if llm_action == "HOLD":
+            # HOLD can be justified if score is close to threshold and volatility is high
+            if 2 <= portfolio_score <= 5 and volatility > 15:
+                logging.debug(f"Deviation justified: Borderline score with high volatility")
+                return True
+
+        # Rule 3: INCREASE to HOLD is justified if Sharpe ratio is low
+        if llm_action == "HOLD" and ml_action == "INCREASE":
+            if sharpe_ratio < 0.3:
+                logging.debug(f"Deviation justified: Low Sharpe ratio ({sharpe_ratio})")
+                return True
+
+        # Default: Deviation is not justified
+        logging.debug(f"Deviation NOT justified: {ml_action} → {llm_action}")
+        return False
+
+
+
+    def _safe_minmax_scale(self, series):
+
+        min_val = series.min()
+        max_val = series.max()
+
+        if max_val == min_val:
+            return pd.Series(
+                [0.5] * len(series),
+                index=series.index
+            )
+
+        return (
+                (series - min_val)
+                /
+                (max_val - min_val)
         )
 
-        return json.loads(
-            response
+
+    def _get_recommendation(
+            self,
+            portfolio_score,
+            sharpe_ratio,
+            volatility,
+            risk_profile
+    ):
+
+        if sharpe_ratio < -0.50:
+            return "REDUCE"
+
+        if volatility > 35:
+            return "REDUCE"
+
+        thresholds = get_thresholds(
+            risk_profile
         )
+
+        if portfolio_score >= thresholds["increase"]:
+            return "INCREASE"
+
+        if portfolio_score >= thresholds["hold"]:
+            return "HOLD"
+
+        return "REDUCE"

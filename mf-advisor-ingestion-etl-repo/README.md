@@ -1,45 +1,38 @@
-Overview
-========
+MF Advisor — Ingestion & Enrichment ETL
+======================================
 
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+Project summary
+---------------
+This Airflow (Astronomer) project ingests mutual fund NAV data, stores raw NAVs in Postgres, and runs Spark enrichment jobs to compute daily and aggregated returns for downstream ML and UI components.
 
-Project Contents
-================
+Key features
+------------
+- Orchestrated DAGs: `mf_advisor_ingestor.py` handles table creation, API ingestion, deduplication, and batched inserts.
+- Spark enrichment: `SparkSubmitOperator` runs scripts in `include/scripts/mf_enricher/` to compute returns and combine outputs.
+- Utilities: resilient date parsing, batched DB writes, Postgres indexing for fast lookups.
 
-Your Astro project contains the following files and folders:
+Repository layout
+-----------------
+- `dags/` — Airflow DAGs (`mf_advisor_ingestor.py`, `etl_weather.py`, `spark_postgres_dag.py`, etc.)
+- `include/scripts/mf_enricher/` — Spark enrichment Python scripts
+- `requirements.txt`, `packages.txt`, `Dockerfile`, and `airflow_settings.yaml` for local Astro dev
 
-- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
-    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
-- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
-- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
-- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
-- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
-- plugins: Add custom or community plugins for your project to this file. It is empty by default.
-- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+Run locally
+-----------
+Start the local Astro/Airflow development environment:
 
-Deploy Your Project Locally
-===========================
+```bash
+astro dev start
+```
 
-Start Airflow on your local machine by running 'astro dev start'.
+Open the Airflow UI at http://localhost:8080. Postgres is available at `localhost:5432/postgres` (default credentials: `postgres`/`postgres`).
 
-This command will spin up five Docker containers on your machine, each for a different Airflow component:
-
-- Postgres: Airflow's Metadata Database
-- Scheduler: The Airflow component responsible for monitoring and triggering tasks
-- DAG Processor: The Airflow component responsible for parsing DAGs
-- API Server: The Airflow component responsible for serving the Airflow UI and API
-- Triggerer: The Airflow component responsible for triggering deferred tasks
-
-When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
-
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
-
-Deploy Your Project to Astronomer
-=================================
-
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+Notes & next steps
+------------------
+- Add CI tests and DAG integrity checks.
+- Add monitoring and alerting for failed ingestion runs.
+- Ensure idempotent validations for production deploys.
 
 Contact
-=======
-
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+-------
+For issues or questions, see the DAGs in `dags/` and the enrichment scripts in `include/scripts/mf_enricher/`.

@@ -56,28 +56,14 @@ fund_b = st.number_input(
 )
 
 fund_c = st.number_input(
-    "Quantum Multi Asset Active FOF - Direct Plan Growth Option - Invested Amount",
+    "Aditya Birla Sun Life Fixed Term Plan - Series TQ (1879 days) - Regular Plan - Growth Option - Invested Amount",
     min_value=0,
     value=1000000,
     step=5000,
     key="fund_c"
 )
 
-fund_d = st.number_input(
-    "Invesco India Large & Mid Cap Fund - Direct Plan - Growth - Invested Amount",
-    min_value=0,
-    value=700000,
-    step=5000,
-    key="fund_d"
-)
 
-fund_e = st.number_input(
-    "Bandhan Short Duration Fund - Direct Plan - Growth - Invested Amount",
-    min_value=0,
-    value=200000,
-    step=5000,
-    key="fund_e"
-)
 
 risk_profile = st.selectbox(
     "Risk Profile",
@@ -101,16 +87,8 @@ portfolio = {
             "amount": float(fund_b)
         },
         {
-            "name": "Quantum Multi Asset Active FOF - Direct Plan Growth Option",
+            "name": "Aditya Birla Sun Life Fixed Term Plan - Series TQ (1879 days) - Regular Plan - Growth Option",
             "amount": float(fund_c)
-        },
-        {
-            "name": "Invesco India Large & Mid Cap Fund - Direct Plan - Growth",
-            "amount": float(fund_d)
-        },
-        {
-            "name": "Bandhan Short Duration Fund - Direct Plan - Growth",
-            "amount": float(fund_e)
         }
     ],
     "risk_profile": risk_profile
@@ -119,7 +97,7 @@ portfolio = {
 # --------------------------------------------------
 # DISPLAY PORTFOLIO SUMMARY
 # --------------------------------------------------
-total_investment = fund_a + fund_b + fund_c + fund_d + fund_e
+total_investment = fund_a + fund_b + fund_c
 
 st.metric(
     label="Total Portfolio Value",
