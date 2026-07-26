@@ -601,6 +601,25 @@ def train_with_random_forest():
         )
 
         pdf = create_target_column(pdf)
+        logger.info(
+            f"Target statistics:\n"
+            f"{pdf['future_return_pct'].describe()}"
+        )
+
+        logger.info(
+            f"95th percentile: "
+            f"{pdf['future_return_pct'].quantile(0.95)}"
+        )
+
+        logger.info(
+            f"99th percentile: "
+            f"{pdf['future_return_pct'].quantile(0.99)}"
+        )
+
+        logger.info(
+            f"Maximum target: "
+            f"{pdf['future_return_pct'].max()}"
+        )
 
         logger.info(
             f"Rows after target creation: "
