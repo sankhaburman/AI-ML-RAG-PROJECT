@@ -84,6 +84,11 @@ with DAG(
             verbose=True,
             packages="org.postgresql:postgresql:42.7.3",
             jars="/opt/spark/jars/postgresql-42.7.3.jar",
+            conf={
+                "spark.driver.memory": "6g",
+                "spark.executor.memory": "4g",
+                "spark.driver.maxResultSize": "2g"
+            }
         )
 
         spark_task.execute(context={})

@@ -27,10 +27,10 @@ METADATA_PATH = "/tmp/models/model_metadata.json"
 # =========================================================
 # CONFIG (4 MONTH MODEL)
 # =========================================================
-TRAINING_WINDOW_DAYS = 120
-PREDICTION_HORIZON_DAYS = 120
+TRAINING_WINDOW_DAYS = 365
+PREDICTION_HORIZON_DAYS = 30
 
-TOTAL_LOOKBACK_DAYS = TRAINING_WINDOW_DAYS + PREDICTION_HORIZON_DAYS  # 240 days
+TOTAL_LOOKBACK_DAYS = TRAINING_WINDOW_DAYS + PREDICTION_HORIZON_DAYS  # 485 days
 
 # =========================================================
 # SPARK SESSION (LIGHT OPTIMIZED)
@@ -44,8 +44,10 @@ def create_spark_session():
             "org.postgresql:postgresql:42.7.3"
         )
         .config("spark.executor.memory", "4g")
-        .config("spark.driver.memory", "4g")
-        .config("spark.sql.shuffle.partitions", "100")
+        .config("spark.driver.memory", "6g")
+        .config("spark.driver.maxResultSize", "2g")
+        .config("spark.sql.shuffle.partitions", "32")
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
         .getOrCreate()
     )
 
@@ -126,6 +128,10 @@ def load_training_dataframe(spark, connection):
         .option("password", connection["password"])
         .option("driver", POSTGRES_DRIVER)
         .option("fetchsize", "2000")
+        .option("partitionColumn", "scheme_code")
+        .option("lowerBound", 1)
+        .option("upperBound", 200000)
+        .option("numPartitions", 8)
         .load()
     )
 
@@ -152,133 +158,338 @@ def get_feature_columns():
 # TARGET (4 MONTH FUTURE NAV)
 # =========================================================
 def create_target_column(pdf):
-
     pdf = pdf.sort_values(["scheme_code", "nav_date"]).copy()
-
     pdf["future_nav"] = (
         pdf.groupby("scheme_code")["nav"]
         .shift(-PREDICTION_HORIZON_DAYS)
     )
-
-    pdf["target_future_nav"] = pdf["future_nav"]
-
+    pdf["future_return_pct"] = (
+                                       (
+                                               pdf["future_nav"] - pdf["nav"]
+                                       ) / pdf["nav"]
+                               ) * 100
     pdf = pdf[
-        (pdf["nav"] > 0) &
-        (pdf["target_future_nav"].notna())
+        (pdf["nav"] > 0)
+        &
+        (pdf["future_return_pct"].notna())
         ]
-
     return pdf
 
 # =========================================================
 # DATASET PREP
 # =========================================================
 def prepare_dataset(pdf):
-
     feature_cols = get_feature_columns()
-
-    pdf = pdf.dropna(subset=feature_cols + ["target_future_nav"])
-
-    X = pdf[feature_cols]
-    y = pdf["target_future_nav"]
-
-    return X, y
+    pdf = pdf.dropna(
+        subset=feature_cols + ["future_return_pct"]
+    )
+    return pdf
 
 # =========================================================
 # MODEL TRAINING
 # =========================================================
-def train_model(X, y):
+def train_model(pdf):
 
-    # Split into train/validation/test (60/20/20)
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y,
-        test_size=0.2,
-        random_state=42
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp,
-        test_size=0.25,
-        random_state=42
+    feature_cols = get_feature_columns()
+
+    # =====================================================
+    # TIME-BASED SPLIT
+    # =====================================================
+
+    pdf = pdf.sort_values("nav_date")
+
+    train_cutoff = pdf["nav_date"].quantile(0.60)
+    val_cutoff = pdf["nav_date"].quantile(0.80)
+
+    train_df = pdf[
+        pdf["nav_date"] <= train_cutoff
+        ]
+
+    val_df = pdf[
+        (pdf["nav_date"] > train_cutoff)
+        &
+        (pdf["nav_date"] <= val_cutoff)
+        ]
+
+    test_df = pdf[
+        pdf["nav_date"] > val_cutoff
+        ]
+
+    logger.info("=" * 60)
+    logger.info("TIME-BASED DATA SPLIT")
+    logger.info("=" * 60)
+
+    logger.info(f"Train Rows: {len(train_df)}")
+    logger.info(f"Validation Rows: {len(val_df)}")
+    logger.info(f"Test Rows: {len(test_df)}")
+
+    logger.info(
+        f"Train Date Range: "
+        f"{train_df['nav_date'].min()} "
+        f"to "
+        f"{train_df['nav_date'].max()}"
     )
 
-    # Feature scaling
+    logger.info(
+        f"Validation Date Range: "
+        f"{val_df['nav_date'].min()} "
+        f"to "
+        f"{val_df['nav_date'].max()}"
+    )
+
+    logger.info(
+        f"Test Date Range: "
+        f"{test_df['nav_date'].min()} "
+        f"to "
+        f"{test_df['nav_date'].max()}"
+    )
+
+    # =====================================================
+    # DATASETS
+    # =====================================================
+
+    X_train = train_df[feature_cols]
+    y_train = train_df["future_return_pct"]
+
+    X_val = val_df[feature_cols]
+    y_val = val_df["future_return_pct"]
+
+    X_test = test_df[feature_cols]
+    y_test = test_df["future_return_pct"]
+
+    logger.info(f"Training shape: {X_train.shape}")
+    logger.info(f"Validation shape: {X_val.shape}")
+    logger.info(f"Test shape: {X_test.shape}")
+
+    # =====================================================
+    # FEATURE SCALING
+    # =====================================================
+
     scaler = StandardScaler()
+
     X_train_scaled = scaler.fit_transform(X_train)
+
     X_val_scaled = scaler.transform(X_val)
+
     X_test_scaled = scaler.transform(X_test)
 
-    # Regularization to prevent overfitting
+    # =====================================================
+    # RANDOM FOREST
+    # =====================================================
+
     model = RandomForestRegressor(
-        n_estimators=150,           # Reduced from 200
-        max_depth=8,                # Reduced from 10
-        min_samples_split=10,       # Increased from 5 (more restrictive)
-        min_samples_leaf=5,         # Increased from 2
-        max_features='sqrt',        # Limit feature sampling per split
-        max_samples=0.8,            # Use 80% of samples per tree
-        n_jobs=-1,
-        random_state=42
+        n_estimators=100,
+        max_depth=6,
+        min_samples_split=30,
+        min_samples_leaf=15,
+        max_features='sqrt',
+        max_samples=0.6,
+        random_state=42,
+        n_jobs=-1
     )
 
-    model.fit(X_train_scaled, y_train)
+    logger.info("Training Random Forest model...")
 
-    # Predictions on all sets
+    model.fit(
+        X_train_scaled,
+        y_train
+    )
+
+    # =====================================================
+    # PREDICTIONS
+    # =====================================================
+
     y_pred_train = model.predict(X_train_scaled)
+
     y_pred_val = model.predict(X_val_scaled)
+
     y_pred_test = model.predict(X_test_scaled)
 
-    # Comprehensive metrics
-    train_r2 = r2_score(y_train, y_pred_train)
-    val_r2 = r2_score(y_val, y_pred_val)
-    test_r2 = r2_score(y_test, y_pred_test)
+    # =====================================================
+    # METRICS
+    # =====================================================
 
-    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
-    val_rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-    test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    train_r2 = r2_score(
+        y_train,
+        y_pred_train
+    )
 
-    train_mae = mean_absolute_error(y_train, y_pred_train)
-    val_mae = mean_absolute_error(y_val, y_pred_val)
-    test_mae = mean_absolute_error(y_test, y_pred_test)
+    val_r2 = r2_score(
+        y_val,
+        y_pred_val
+    )
 
-    # Overfitting detection
+    test_r2 = r2_score(
+        y_test,
+        y_pred_test
+    )
+
+    train_rmse = np.sqrt(
+        mean_squared_error(
+            y_train,
+            y_pred_train
+        )
+    )
+
+    val_rmse = np.sqrt(
+        mean_squared_error(
+            y_val,
+            y_pred_val
+        )
+    )
+
+    test_rmse = np.sqrt(
+        mean_squared_error(
+            y_test,
+            y_pred_test
+        )
+    )
+
+    train_mae = mean_absolute_error(
+        y_train,
+        y_pred_train
+    )
+
+    val_mae = mean_absolute_error(
+        y_val,
+        y_pred_val
+    )
+
+    test_mae = mean_absolute_error(
+        y_test,
+        y_pred_test
+    )
+
+    # =====================================================
+    # OVERFITTING ANALYSIS
+    # =====================================================
+
     rmse_gap = test_rmse - train_rmse
+
     r2_gap = train_r2 - test_r2
 
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("TRAINING METRICS")
-    logger.info("="*60)
-    logger.info(f"Train R² Score: {train_r2:.4f}")
-    logger.info(f"Validation R² Score: {val_r2:.4f}")
-    logger.info(f"Test R² Score: {test_r2:.4f}")
-    logger.info(f"\nTrain RMSE: {train_rmse:.4f}")
-    logger.info(f"Validation RMSE: {val_rmse:.4f}")
-    logger.info(f"Test RMSE: {test_rmse:.4f}")
-    logger.info(f"\nTrain MAE: {train_mae:.4f}")
-    logger.info(f"Validation MAE: {val_mae:.4f}")
-    logger.info(f"Test MAE: {test_mae:.4f}")
-    logger.info("\n" + "="*60)
+    logger.info("=" * 60)
+
+    logger.info(
+        f"Train R² Score: {train_r2:.4f}"
+    )
+
+    logger.info(
+        f"Validation R² Score: {val_r2:.4f}"
+    )
+
+    logger.info(
+        f"Test R² Score: {test_r2:.4f}"
+    )
+
+    logger.info(
+        f"\nTrain RMSE: {train_rmse:.4f}"
+    )
+
+    logger.info(
+        f"Validation RMSE: {val_rmse:.4f}"
+    )
+
+    logger.info(
+        f"Test RMSE: {test_rmse:.4f}"
+    )
+
+    logger.info(
+        f"\nTrain MAE: {train_mae:.4f}"
+    )
+
+    logger.info(
+        f"Validation MAE: {val_mae:.4f}"
+    )
+
+    logger.info(
+        f"Test MAE: {test_mae:.4f}"
+    )
+
+    logger.info("\n" + "=" * 60)
     logger.info("OVERFITTING ANALYSIS")
-    logger.info("="*60)
-    logger.info(f"RMSE Gap (Test - Train): {rmse_gap:.4f}")
-    logger.info(f"R² Gap (Train - Test): {r2_gap:.6f}")
+    logger.info("=" * 60)
+
+    logger.info(
+        f"RMSE Gap (Test - Train): {rmse_gap:.4f}"
+    )
+
+    logger.info(
+        f"R² Gap (Train - Test): {r2_gap:.6f}"
+    )
+
     if rmse_gap > 10:
-        logger.warning("⚠️ HIGH OVERFITTING DETECTED: Large RMSE gap!")
+        logger.warning(
+            "⚠️ HIGH OVERFITTING DETECTED: Large RMSE gap!"
+        )
     elif r2_gap > 0.01:
-        logger.warning("⚠️ MODERATE OVERFITTING: R² gap significant")
+        logger.warning(
+            "⚠️ MODERATE OVERFITTING: R² gap significant"
+        )
     else:
-        logger.info("✓ Good generalization: Train/test metrics close")
-    logger.info("="*60 + "\n")
+        logger.info(
+            "✓ Good generalization: Train/test metrics close"
+        )
 
-    # Cross-validation
-    cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=5, scoring='r2')
-    logger.info(f"Cross-validation R² Scores: {cv_scores}")
-    logger.info(f"Cross-validation Mean R²: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+    logger.info("=" * 60 + "\n")
 
-    # Feature importance
-    feature_importance = pd.DataFrame({
-        'feature': X_train.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
+    # =====================================================
+    # CROSS VALIDATION
+    # =====================================================
 
-    logger.info(f"\nTop 5 Important Features:\n{feature_importance.head()}")
+    cv_scores = cross_val_score(
+        model,
+        X_train_scaled,
+        y_train,
+        cv=3,
+        scoring="r2",
+        n_jobs=-1
+    )
+
+    logger.info(
+        f"Cross-validation R² Scores: {cv_scores}"
+    )
+
+    logger.info(
+        f"Cross-validation Mean R²: "
+        f"{cv_scores.mean():.4f} "
+        f"(+/- {cv_scores.std():.4f})"
+    )
+
+    # =====================================================
+    # FEATURE IMPORTANCE
+    # =====================================================
+
+    feature_importance = pd.DataFrame(
+        {
+            "feature": X_train.columns,
+            "importance": model.feature_importances_
+        }
+    ).sort_values(
+        "importance",
+        ascending=False
+    )
+
+    logger.info(
+        f"\nTop 5 Important Features:\n"
+        f"{feature_importance.head()}"
+    )
+    top_feature = feature_importance.iloc[0]
+
+    logger.info(
+        f"Most Important Feature: "
+        f"{top_feature['feature']} "
+        f"({top_feature['importance']:.4f})"
+    )
+
+    if top_feature["importance"] > 0.50:
+        logger.warning(
+            "Potential feature leakage detected. "
+            "One feature contributes more than 50% "
+            "of model importance."
+        )
 
     metrics = {
         "train_r2": float(train_r2),
@@ -296,8 +507,12 @@ def train_model(X, y):
         "cv_std_r2": float(cv_scores.std())
     }
 
-    return model, scaler, metrics, feature_importance
-
+    return (
+        model,
+        scaler,
+        metrics,
+        feature_importance
+    )
 # =========================================================
 # SAVE MODEL
 # =========================================================
@@ -312,6 +527,7 @@ def save_model(model, scaler, metrics, feature_importance):
 
     metadata = {
         "model_type": "RandomForestRegressor",
+        "target": "future_return_pct",
         "metrics": metrics,
         "feature_importance": feature_importance.to_dict(orient='records'),
         "features": get_feature_columns(),
@@ -331,38 +547,91 @@ def save_model(model, scaler, metrics, feature_importance):
 # =========================================================
 def train_with_random_forest():
 
-    logger.info("Starting 4-month NAV prediction model...")
+    logger.info("Starting Random Forest training...")
 
     spark = create_spark_session()
 
     try:
+
         connection = get_postgres_connection()
 
-        spark_df = load_training_dataframe(spark, connection)
+        spark_df = load_training_dataframe(
+            spark,
+            connection
+        )
 
-        logger.info(f"Rows loaded: {spark_df.count()}")
+        logger.info(
+            f"Source rows: {spark_df.count()}"
+        )
+
+        # ==================================================
+        # LIMIT DATA BEFORE PANDAS
+        # ==================================================
+
+        # Random sampling preserves scheme history much better
+        sample_fraction = 0.20
+
+        spark_df = spark_df.sample(
+            withReplacement=False,
+            fraction=sample_fraction,
+            seed=42
+        )
+        # Reduce partitions before collect
+        spark_df = spark_df.coalesce(4)
+        pdf = spark_df.toPandas()
+        logger.info(
+            f"Pandas dataframe shape: {pdf.shape}"
+        )
+
+        # Reduce partitions before collect
+        spark_df = spark_df.coalesce(4)
+        # ==================================================
+        # CONVERT TO PANDAS
+        # ==================================================
 
         pdf = spark_df.toPandas()
 
-        pdf["nav_date"] = pd.to_datetime(pdf["nav_date"])
+        logger.info(
+            f"Pandas dataframe shape: "
+            f"{pdf.shape}"
+        )
+
+        pdf["nav_date"] = pd.to_datetime(
+            pdf["nav_date"]
+        )
 
         pdf = create_target_column(pdf)
 
-        logger.info(f"Rows after target creation: {len(pdf)}")
+        logger.info(
+            f"Rows after target creation: "
+            f"{len(pdf)}"
+        )
 
-        X, y = prepare_dataset(pdf)
+        pdf = prepare_dataset(pdf)
 
-        logger.info(f"Training shape: {X.shape}")
+        logger.info(
+            f"Rows after preparation: "
+            f"{len(pdf)}"
+        )
 
-        model, scaler, metrics, feature_importance = train_model(X, y)
+        model, scaler, metrics, feature_importance = (
+            train_model(pdf)
+        )
 
-        save_model(model, scaler, metrics, feature_importance)
+        save_model(
+            model,
+            scaler,
+            metrics,
+            feature_importance
+        )
 
-        logger.info("Training completed successfully.")
+        logger.info(
+            "Training completed successfully."
+        )
 
     finally:
-        spark.stop()
 
+        spark.stop()
 # =========================================================
 # ENTRY POINT
 # =========================================================
