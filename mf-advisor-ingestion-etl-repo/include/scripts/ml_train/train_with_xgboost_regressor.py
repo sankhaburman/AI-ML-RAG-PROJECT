@@ -69,22 +69,15 @@ SPARK_SHUFFLE_PARTITIONS = "32"
 # =========================================================
 XGB_PARAMS = {
     "objective": "reg:squarederror",
-
-    "n_estimators": 600,
-    "learning_rate": 0.03,
-
-    "max_depth": 3,
-
+    "n_estimators": 300,
+    "learning_rate": 0.05,
+    "max_depth": 4,
     "min_child_weight": 40,
-
     "subsample": 0.7,
     "colsample_bytree": 0.6,
-
     "gamma": 0.5,
-
     "reg_alpha": 5.0,
     "reg_lambda": 10.0,
-
     "random_state": 42,
     "n_jobs": -1
 }
