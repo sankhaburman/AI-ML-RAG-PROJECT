@@ -35,7 +35,7 @@ with DAG(
         default_args=default_args,
         schedule="@weekly",
         catchup=False,
-        tags=["mfadvisor-model-training"],
+        tags=["mf-advisor"],
 ) as dag:
 
     #########################################################

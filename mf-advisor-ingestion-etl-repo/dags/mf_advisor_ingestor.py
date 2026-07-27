@@ -31,7 +31,7 @@ with DAG(
         default_args=default_args,
         schedule_interval='@weekly',
         catchup=False,
-        tags=["mfadvisor-data-ingestion"]
+        tags=["mf-advisor"]
 ) as dag:
 
 
