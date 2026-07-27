@@ -100,7 +100,38 @@ with DAG(
         return "random_forest_completed"
 
     #########################################################
-    # TASK 3 - VERIFY MODEL
+    # TASK 3 - XGBOOST
+    #########################################################
+    @task(task_id="train_ml_with_xgboost")
+    def train_ml_with_xgboost():
+        logger.info("=======================================================")
+        logger.info("Starting ML Training with XGBoost Regressor")
+        logger.info("=======================================================")
+
+        spark_task = SparkSubmitOperator(
+            task_id="train_with_xgboost_regressor_task_internal",
+            application="./include/scripts/ml_train/train_with_xgboost_regressor.py",
+            conn_id="my_spark_conn",
+            verbose=True,
+            packages="org.postgresql:postgresql:42.7.3",
+            jars="/opt/spark/jars/postgresql-42.7.3.jar",
+            conf={
+                "spark.driver.memory": "6g",
+                "spark.executor.memory": "4g",
+                "spark.driver.maxResultSize": "2g"
+            }
+        )
+
+        spark_task.execute(context={})
+
+        logger.info("=======================================================")
+        logger.info("XGBoost Regressor Training Completed")
+        logger.info("=======================================================")
+
+        return "xg_boost_training_completed"
+
+    #########################################################
+    # TASK 4 - VERIFY RF MODEL
     #########################################################
 
     @task(task_id="verify_random_forest_model")
@@ -167,9 +198,7 @@ with DAG(
     #########################################################
 
     linear_task = train_ml_with_linear_regression()
-
     random_forest_task = train_ml_with_random_forest()
-
-    verify_model_task = verify_random_forest_model()
-
-    linear_task >> random_forest_task >> verify_model_task
+    xgboost_task  = train_ml_with_xgboost()
+    verify_rf_model_task = verify_random_forest_model()
+    linear_task >> random_forest_task >> verify_rf_model_task >> xgboost_task
