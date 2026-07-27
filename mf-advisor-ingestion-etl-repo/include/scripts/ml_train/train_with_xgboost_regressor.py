@@ -458,8 +458,6 @@ def get_xgboost_features():
 
     return [
 
-        # Original Features
-
         "daily_return_pct",
         "weekly_return_pct",
         "monthly_return_pct",
@@ -472,29 +470,24 @@ def get_xgboost_features():
         "moving_avg_90d",
         "moving_avg_200d",
 
-        "cagr_percent",
+        # REMOVE
+        # "cagr_percent",
+
         "sharpe_ratio",
         "annualized_volatility",
 
-        # New Features
-
         "momentum_90d",
-
         "trend_strength",
-
         "risk_adjusted_return",
-
         "ma_crossover",
-
         "short_term_trend",
-
         "long_term_trend",
-
         "volatility_score",
 
-        "quality_score"
-    ]
+        # quality_score depends on CAGR
+        # remove temporarily
 
+    ]
 
 # =========================================================
 # TARGET CREATION
