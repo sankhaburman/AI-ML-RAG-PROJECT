@@ -69,15 +69,22 @@ SPARK_SHUFFLE_PARTITIONS = "32"
 # =========================================================
 XGB_PARAMS = {
     "objective": "reg:squarederror",
-    "n_estimators": 1500,
-    "learning_rate": 0.02,
-    "max_depth": 4,
-    "min_child_weight": 20,
-    "subsample": 0.8,
-    "colsample_bytree": 0.7,
-    "gamma": 0.2,
-    "reg_alpha": 2.0,
-    "reg_lambda": 5.0,
+
+    "n_estimators": 600,
+    "learning_rate": 0.03,
+
+    "max_depth": 3,
+
+    "min_child_weight": 40,
+
+    "subsample": 0.7,
+    "colsample_bytree": 0.6,
+
+    "gamma": 0.5,
+
+    "reg_alpha": 5.0,
+    "reg_lambda": 10.0,
+
     "random_state": 42,
     "n_jobs": -1
 }
@@ -322,114 +329,55 @@ def convert_numeric_columns(pdf):
 # ADVANCED FEATURE ENGINEERING
 # =========================================================
 def create_advanced_features(pdf):
+
     logger.info(
         "Creating advanced XGBoost features..."
     )
+
     # ==========================================
     # MOMENTUM
     # ==========================================
-    pdf["momentum_90d"] = (
 
+    pdf["momentum_90d"] = (
                                   (
-                                          pdf["nav"]
-                                          -
+                                          pdf["nav"] -
                                           pdf["moving_avg_90d"]
                                   )
                                   /
                                   pdf["moving_avg_90d"]
-
                           ) * 100
+
     pdf["momentum_30d"] = (
-                                  (pdf["nav"] - pdf["moving_avg_30d"])
-                                  / pdf["moving_avg_30d"]
+                                  (
+                                          pdf["nav"] -
+                                          pdf["moving_avg_30d"]
+                                  )
+                                  /
+                                  pdf["moving_avg_30d"]
                           ) * 100
 
     pdf["momentum_200d"] = (
-                                   (pdf["nav"] - pdf["moving_avg_200d"])
-                                   / pdf["moving_avg_200d"]
+                                   (
+                                           pdf["nav"] -
+                                           pdf["moving_avg_200d"]
+                                   )
+                                   /
+                                   pdf["moving_avg_200d"]
                            ) * 100
-
-    # ==========================================
-    # TREND STRENGTH
-    # ==========================================
-
-    pdf["trend_strength"] = (
-            pdf["moving_avg_30d"]
-            /
-            pdf["moving_avg_200d"]
-    )
 
     # ==========================================
     # RISK ADJUSTED RETURN
     # ==========================================
 
     pdf["risk_adjusted_return"] = (
-
             pdf["rolling_return_90d_pct"]
-
             /
-
             pdf["annualized_volatility"]
             .replace(0, np.nan)
-
     )
 
     # ==========================================
-    # MOVING AVERAGE CROSSOVER
-    # ==========================================
-
-    pdf["ma_crossover"] = np.where(
-
-        pdf["moving_avg_30d"]
-        >
-        pdf["moving_avg_200d"],
-
-        1,
-
-        0
-    )
-
-    # ==========================================
-    # SHORT TERM TREND
-    # ==========================================
-
-    pdf["short_term_trend"] = (
-
-            pdf["moving_avg_7d"]
-            /
-            pdf["moving_avg_30d"]
-
-    )
-
-    # ==========================================
-    # LONG TERM TREND
-    # ==========================================
-
-    pdf["long_term_trend"] = (
-
-            pdf["moving_avg_90d"]
-            /
-            pdf["moving_avg_200d"]
-
-    )
-
-    # ==========================================
-    # VOLATILITY SCORE
-    # ==========================================
-
-    pdf["volatility_score"] = (
-
-            1
-            /
-            (
-                pdf["annualized_volatility"]
-                .replace(0, np.nan)
-            )
-
-    )
-
-    # ==========================================
-    # SHARPE × CAGR
+    # QUALITY SCORE
     # ==========================================
 
     pdf["quality_score"] = (
@@ -449,7 +397,6 @@ def create_advanced_features(pdf):
 
     return pdf
 
-
 # =========================================================
 # FEATURE LIST FOR XGBOOST
 # =========================================================
@@ -458,6 +405,10 @@ def get_xgboost_features():
 
     return [
 
+        # ======================================
+        # RETURNS
+        # ======================================
+
         "daily_return_pct",
         "weekly_return_pct",
         "monthly_return_pct",
@@ -465,30 +416,34 @@ def get_xgboost_features():
         "rolling_return_30d_pct",
         "rolling_return_90d_pct",
 
+        # ======================================
+        # MOVING AVERAGES
+        # ======================================
+
         "moving_avg_7d",
         "moving_avg_30d",
         "moving_avg_90d",
         "moving_avg_200d",
 
-        # REMOVE
-        # "cagr_percent",
+        # ======================================
+        # RISK METRICS
+        # ======================================
 
         "sharpe_ratio",
         "annualized_volatility",
 
+        # ======================================
+        # ENGINEERED FEATURES
+        # ======================================
+
+        "momentum_30d",
         "momentum_90d",
-        "trend_strength",
+        "momentum_200d",
+
         "risk_adjusted_return",
-        "ma_crossover",
-        "short_term_trend",
-        "long_term_trend",
-        "volatility_score",
 
-        # quality_score depends on CAGR
-        # remove temporarily
-
+        "quality_score"
     ]
-
 # =========================================================
 # TARGET CREATION
 # =========================================================
@@ -811,7 +766,8 @@ def train_xgboost_model(pdf):
     # =====================================================
 
     model = XGBRegressor(
-        **XGB_PARAMS
+        **XGB_PARAMS,
+        early_stopping_rounds=50
     )
 
     logger.info(
