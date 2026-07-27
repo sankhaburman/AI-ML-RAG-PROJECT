@@ -68,32 +68,19 @@ SPARK_SHUFFLE_PARTITIONS = "32"
 # XGBOOST CONFIG
 # =========================================================
 XGB_PARAMS = {
-    "objective":
-        "reg:squarederror",
-    "n_estimators":
-        500,
-    "learning_rate":
-        0.03,
-    "max_depth":
-        5,
-    "min_child_weight":
-        10,
-    "subsample":
-        0.8,
-    "colsample_bytree":
-        0.8,
-    "gamma":
-        0.1,
-    "reg_alpha":
-        1.0,
-    "reg_lambda":
-        3.0,
-    "random_state":
-        42,
-    "n_jobs":
-        -1
+    "objective": "reg:squarederror",
+    "n_estimators": 1500,
+    "learning_rate": 0.02,
+    "max_depth": 4,
+    "min_child_weight": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.7,
+    "gamma": 0.2,
+    "reg_alpha": 2.0,
+    "reg_lambda": 5.0,
+    "random_state": 42,
+    "n_jobs": -1
 }
-
 # =========================================================
 # SPARK SESSION
 # =========================================================
@@ -352,6 +339,15 @@ def create_advanced_features(pdf):
                                   pdf["moving_avg_90d"]
 
                           ) * 100
+    pdf["momentum_30d"] = (
+                                  (pdf["nav"] - pdf["moving_avg_30d"])
+                                  / pdf["moving_avg_30d"]
+                          ) * 100
+
+    pdf["momentum_200d"] = (
+                                   (pdf["nav"] - pdf["moving_avg_200d"])
+                                   / pdf["moving_avg_200d"]
+                           ) * 100
 
     # ==========================================
     # TREND STRENGTH
@@ -437,13 +433,14 @@ def create_advanced_features(pdf):
     # ==========================================
 
     pdf["quality_score"] = (
-
             pdf["sharpe_ratio"]
-
             *
-
-            pdf["cagr_percent"]
-
+            np.log1p(
+                np.maximum(
+                    pdf["cagr_percent"],
+                    0
+                )
+            )
     )
 
     logger.info(
@@ -570,37 +567,16 @@ def create_target_column(pdf):
 
 def remove_target_outliers(pdf):
 
-    logger.info(
-        "Removing extreme target outliers..."
-    )
+    logger.info("Removing extreme target outliers...")
 
-    q01 = pdf[
-        "future_return_pct"
-    ].quantile(0.01)
+    q01 = pdf["future_return_pct"].quantile(0.01)
+    q99 = pdf["future_return_pct"].quantile(0.99)
 
-    q99 = pdf[
-        "future_return_pct"
-    ].quantile(0.99)
-
-    pdf = pdf[
-
-        (
-                pdf["future_return_pct"]
-                >= q01
-        )
-
-        &
-
-        (
-                pdf["future_return_pct"]
-                <= q99
-        )
-        ]
-
-    logger.info(
-        f"Rows after outlier removal: {len(pdf)}"
-    )
-
+    pdf["future_return_pct"] = (
+    pdf["future_return_pct"]
+    .clip(q01, q99)
+)
+    logger.info(f"Rows after outlier removal: {len(pdf)}")
     return pdf
 
 
@@ -852,12 +828,10 @@ def train_xgboost_model(pdf):
     model.fit(
         X_train,
         y_train,
-
         eval_set=[
-            (X_train, y_train),
             (X_val, y_val)
         ],
-
+        #early_stopping_rounds=50,
         verbose=50
     )
 
