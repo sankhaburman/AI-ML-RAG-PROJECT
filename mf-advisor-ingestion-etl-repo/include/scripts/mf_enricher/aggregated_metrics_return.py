@@ -1,6 +1,7 @@
+import logging
+
 from airflow.hooks.base import BaseHook
 from pyspark.sql import SparkSession
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -8,19 +9,15 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # =========================================================
 
-APP_NAME = "CALCULATE-NAV-AGGREGATED-METRICS-JOB"
+APP_NAME = "CALCULATE-ROLLING-METRICS-JOB"
 
 POSTGRES_DRIVER = "org.postgresql.Driver"
 
 FETCH_SIZE = "1000"
 
-LOOKBACK_PERIOD = "3 years"
-
-OUTPUT_TABLE = "mf_aggregated_scheme_metrics"
+OUTPUT_TABLE = "mf_rolling_scheme_metrics"
 
 RISK_FREE_RATE = 6.0
-
-MIN_RECORDS_REQUIRED = 30
 
 # =========================================================
 # SPARK SESSION
@@ -31,23 +28,18 @@ def create_spark_session():
     return (
         SparkSession.builder
         .appName(APP_NAME)
-
         .config(
             "spark.jars.packages",
             "org.postgresql:postgresql:42.7.3"
         )
-
         .config("spark.executor.memory", "5g")
         .config("spark.driver.memory", "5g")
-
         .config("spark.executor.cores", "2")
-
         .config("spark.default.parallelism", "2")
-
         .config("spark.sql.shuffle.partitions", "20")
-
         .getOrCreate()
     )
+
 
 # =========================================================
 # POSTGRES CONNECTION
@@ -68,293 +60,160 @@ def get_postgres_connection():
         "password": conn.password
     }
 
+
 # =========================================================
-# CAGR QUERY
+# ROLLING METRICS QUERY
 # =========================================================
 
-def build_cagr_query():
+def build_rolling_metrics_query():
 
-    logger.info("****** Building CAGR SQL Query ******")
+    logger.info(
+        "****** Building Rolling Metrics SQL Query ******"
+    )
 
     return f"""
     (
 
-        WITH filtered_nav AS (
+        WITH base_data AS (
 
             SELECT
+
                 scheme_code,
+
                 nav_date,
-                nav
+
+                nav,
+
+                daily_return_pct,
+
+                AVG(daily_return_pct)
+                OVER (
+                    PARTITION BY scheme_code
+                    ORDER BY nav_date
+                    ROWS BETWEEN 89 PRECEDING
+                    AND CURRENT ROW
+                ) AS avg_return_90d,
+
+                STDDEV(daily_return_pct)
+                OVER (
+                    PARTITION BY scheme_code
+                    ORDER BY nav_date
+                    ROWS BETWEEN 89 PRECEDING
+                    AND CURRENT ROW
+                ) AS volatility_90d,
+
+                AVG(daily_return_pct)
+                OVER (
+                    PARTITION BY scheme_code
+                    ORDER BY nav_date
+                    ROWS BETWEEN 179 PRECEDING
+                    AND CURRENT ROW
+                ) AS avg_return_180d,
+
+                STDDEV(daily_return_pct)
+                OVER (
+                    PARTITION BY scheme_code
+                    ORDER BY nav_date
+                    ROWS BETWEEN 179 PRECEDING
+                    AND CURRENT ROW
+                ) AS volatility_180d,
+
+                LAG(nav, 365)
+                OVER (
+                    PARTITION BY scheme_code
+                    ORDER BY nav_date
+                ) AS nav_365d_ago
 
             FROM mf_daily_returns
 
-            WHERE nav_date >=
-                  CURRENT_DATE - INTERVAL '{LOOKBACK_PERIOD}'
+            WHERE nav IS NOT NULL
 
-              AND nav IS NOT NULL
-
-        ),
-
-        valid_schemes AS (
-
-            SELECT
-                scheme_code,
-                COUNT(*) AS total_records
-
-            FROM filtered_nav
-
-            GROUP BY scheme_code
-
-            HAVING COUNT(*) >= {MIN_RECORDS_REQUIRED}
-        ),
-
-        ranked_nav AS (
-
-            SELECT
-                f.scheme_code,
-                f.nav_date,
-                f.nav,
-
-                ROW_NUMBER() OVER (
-                    PARTITION BY f.scheme_code
-                    ORDER BY f.nav_date ASC
-                ) AS rn_start,
-
-                ROW_NUMBER() OVER (
-                    PARTITION BY f.scheme_code
-                    ORDER BY f.nav_date DESC
-                ) AS rn_end
-
-            FROM filtered_nav f
-
-            INNER JOIN valid_schemes v
-                ON f.scheme_code = v.scheme_code
-        ),
-
-        start_nav AS (
-
-            SELECT
-
-                scheme_code,
-
-                nav AS initial_nav,
-
-                nav_date AS start_date
-
-            FROM ranked_nav
-
-            WHERE rn_start = 1
-        ),
-
-        end_nav AS (
-
-            SELECT
-
-                scheme_code,
-
-                nav AS final_nav,
-
-                nav_date AS end_date
-
-            FROM ranked_nav
-
-            WHERE rn_end = 1
-        ),
-
-        cagr_base AS (
-
-            SELECT
-
-                s.scheme_code,
-
-                (
-                    e.end_date - s.start_date
-                ) / 365.25 AS years,
-
-                s.initial_nav,
-
-                e.final_nav
-
-            FROM start_nav s
-
-            INNER JOIN end_nav e
-                ON s.scheme_code = e.scheme_code
         )
 
         SELECT
 
             scheme_code,
 
+            nav_date,
+
             ROUND(
                 CAST(
                     (
-                        POWER(
-                            final_nav / initial_nav,
-                            1 / NULLIF(years, 0)
-                        ) - 1
+                        SQRT(252)
+                        *
+                        (
+                            avg_return_90d
+                            -
+                            ({RISK_FREE_RATE} / 252.0)
+                        )
+                        /
+                        NULLIF(volatility_90d, 0)
+                    )
+                    AS NUMERIC
+                ),
+                6
+            ) AS rolling_sharpe_90d,
+
+            ROUND(
+                CAST(
+                    (
+                        SQRT(252)
+                        *
+                        (
+                            avg_return_180d
+                            -
+                            ({RISK_FREE_RATE} / 252.0)
+                        )
+                        /
+                        NULLIF(volatility_180d, 0)
+                    )
+                    AS NUMERIC
+                ),
+                6
+            ) AS rolling_sharpe_180d,
+
+            ROUND(
+                CAST(
+                    (
+                        volatility_90d
+                        * SQRT(252)
+                    )
+                    AS NUMERIC
+                ),
+                6
+            ) AS rolling_volatility_90d,
+
+            ROUND(
+                CAST(
+                    (
+                        volatility_180d
+                        * SQRT(252)
+                    )
+                    AS NUMERIC
+                ),
+                6
+            ) AS rolling_volatility_180d,
+
+            ROUND(
+                CAST(
+                    (
+                        (
+                            nav
+                            /
+                            NULLIF(nav_365d_ago, 0)
+                        )
+                        - 1
                     ) * 100
                     AS NUMERIC
                 ),
                 6
-            ) AS cagr_percent
+            ) AS rolling_cagr_365d
 
-        FROM cagr_base
+        FROM base_data
 
-        WHERE years > 0
-
-          AND initial_nav > 0
-
-          AND final_nav > 0
-
-    ) cagr_table
+    ) rolling_metrics_table
     """
 
-# =========================================================
-# SHARPE RATIO QUERY
-# =========================================================
-
-def build_sharpe_ratio_query():
-
-    logger.info(
-        "****** Building Sharpe Ratio SQL Query ******"
-    )
-
-    return f"""
-    (
-
-        WITH return_stats AS (
-
-            SELECT
-
-                scheme_code,
-
-                COUNT(*) AS total_records,
-
-                AVG(daily_return_pct) AS avg_daily_return,
-
-                STDDEV(daily_return_pct) AS volatility
-
-            FROM mf_daily_returns
-
-            WHERE daily_return_pct IS NOT NULL
-
-              AND nav_date >=
-                  CURRENT_DATE - INTERVAL '{LOOKBACK_PERIOD}'
-
-            GROUP BY scheme_code
-
-            HAVING COUNT(*) >= {MIN_RECORDS_REQUIRED}
-        )
-
-        SELECT
-
-            scheme_code,
-
-            ROUND(
-                CAST(
-                    SQRT(252)
-
-                    *
-
-                    (
-                        (
-                            avg_daily_return
-                            - ({RISK_FREE_RATE} / 252)
-                        )
-
-                        / NULLIF(volatility, 0)
-                    )
-
-                    AS NUMERIC
-                ),
-                6
-            ) AS sharpe_ratio
-
-        FROM return_stats
-
-        WHERE volatility > 0
-
-    ) sharpe_ratio_table
-    """
-
-# =========================================================
-# DAILY VOLATILITY QUERY
-# =========================================================
-
-def build_daily_volatility_query():
-
-    logger.info(
-        "****** Building Daily Volatility SQL Query ******"
-    )
-
-    return f"""
-    (
-
-        SELECT
-
-            scheme_code,
-
-            ROUND(
-                CAST(
-                    STDDEV(daily_return_pct)
-                    AS NUMERIC
-                ),
-                6
-            ) AS daily_volatility
-
-        FROM mf_daily_returns
-
-        WHERE daily_return_pct IS NOT NULL
-
-          AND nav_date >=
-              CURRENT_DATE - INTERVAL '{LOOKBACK_PERIOD}'
-
-        GROUP BY scheme_code
-
-        HAVING COUNT(*) >= {MIN_RECORDS_REQUIRED}
-
-    ) daily_volatility_table
-    """
-
-# =========================================================
-# ANNUALIZED VOLATILITY QUERY
-# =========================================================
-
-def build_annualized_volatility_query():
-
-    logger.info(
-        "****** Building Annualized Volatility SQL Query ******"
-    )
-
-    return f"""
-    (
-
-        SELECT
-
-            scheme_code,
-
-            ROUND(
-                CAST(
-                    STDDEV(daily_return_pct)
-                    * SQRT(252)
-                    AS NUMERIC
-                ),
-                6
-            ) AS annualized_volatility
-
-        FROM mf_daily_returns
-
-        WHERE daily_return_pct IS NOT NULL
-
-          AND nav_date >=
-              CURRENT_DATE - INTERVAL '{LOOKBACK_PERIOD}'
-
-        GROUP BY scheme_code
-
-        HAVING COUNT(*) >= {MIN_RECORDS_REQUIRED}
-
-    ) annualized_volatility_table
-    """
 
 # =========================================================
 # LOAD DATAFRAME
@@ -363,36 +222,26 @@ def build_annualized_volatility_query():
 def load_dataframe(
         spark,
         connection,
-        query
-):
+        query):
 
-    logger.info("Loading dataframe...")
+    logger.info("Loading dataframe")
 
     return (
-        spark.read.format("jdbc")
-
+        spark.read
+        .format("jdbc")
         .option("url", connection["jdbc_url"])
-
         .option("dbtable", query)
-
         .option("user", connection["user"])
-
         .option("password", connection["password"])
-
         .option("driver", POSTGRES_DRIVER)
-
         .option("fetchsize", FETCH_SIZE)
-
         .option("partitionColumn", "scheme_code")
-
         .option("lowerBound", "1")
-
         .option("upperBound", "200000")
-
-        .option("numPartitions", "2")
-
+        .option("numPartitions", "4")
         .load()
     )
+
 
 # =========================================================
 # VALIDATION
@@ -401,48 +250,38 @@ def load_dataframe(
 def validate_dataframe(df, title):
 
     logger.info(
-        f"Displaying sample records for: {title}"
+        f"Displaying sample records for {title}"
     )
 
-    df.show(20, truncate=False)
-
-# =========================================================
-# JOIN ALL METRICS
-# =========================================================
-
-def join_metrics(
-        cagr_df,
-        sharpe_df,
-        daily_volatility_df,
-        annualized_volatility_df
-):
-
-    logger.info("Joining all metrics dataframes...")
-
-    final_df = (
-
-        cagr_df.alias("c")
-
-        .join(
-            sharpe_df.alias("s"),
-            on="scheme_code",
-            how="left"
-        )
-
-        .join(
-            daily_volatility_df.alias("d"),
-            on="scheme_code",
-            how="left"
-        )
-
-        .join(
-            annualized_volatility_df.alias("a"),
-            on="scheme_code",
-            how="left"
-        )
+    logger.info(
+        f"Record count = {df.count()}"
     )
 
-    return final_df
+    df.show(
+        20,
+        truncate=False
+    )
+
+
+# =========================================================
+# DATA CLEANING
+# =========================================================
+
+def clean_metrics(df):
+
+    logger.info(
+        "Cleaning rolling metrics dataframe"
+    )
+
+    df = df.dropDuplicates(
+        [
+            "scheme_code",
+            "nav_date"
+        ]
+    )
+
+    return df
+
 
 # =========================================================
 # WRITE OUTPUT
@@ -450,163 +289,97 @@ def join_metrics(
 
 def write_to_postgres(
         df,
-        connection
-):
+        connection):
 
     logger.info(
-        f"Writing metrics to table: {OUTPUT_TABLE}"
+        f"Writing output table: {OUTPUT_TABLE}"
     )
 
     (
         df.write
         .mode("overwrite")
         .format("jdbc")
-
-        .option("url", connection["jdbc_url"])
-
-        .option("dbtable", OUTPUT_TABLE)
-
-        .option("user", connection["user"])
-
-        .option("password", connection["password"])
-
-        .option("driver", POSTGRES_DRIVER)
-
-        .option("batchsize", "1000")
-
+        .option(
+            "url",
+            connection["jdbc_url"]
+        )
+        .option(
+            "dbtable",
+            OUTPUT_TABLE
+        )
+        .option(
+            "user",
+            connection["user"]
+        )
+        .option(
+            "password",
+            connection["password"]
+        )
+        .option(
+            "driver",
+            POSTGRES_DRIVER
+        )
+        .option(
+            "batchsize",
+            "5000"
+        )
         .save()
     )
 
-    logger.info("Metrics write completed.")
+    logger.info(
+        "Rolling metrics write completed"
+    )
+
 
 # =========================================================
 # MAIN PIPELINE
 # =========================================================
 
-def calculate_aggregate_metrics():
+def calculate_rolling_metrics():
 
     logger.info(
-        "Starting aggregate metrics pipeline..."
+        "Starting rolling metrics pipeline"
     )
-
-    # -----------------------------------------
-    # Spark Session
-    # -----------------------------------------
 
     spark = create_spark_session()
 
-    # -----------------------------------------
-    # PostgreSQL Connection
-    # -----------------------------------------
-
     connection = get_postgres_connection()
 
-    # =====================================================
-    # CAGR
-    # =====================================================
+    rolling_query = (
+        build_rolling_metrics_query()
+    )
 
-    cagr_query = build_cagr_query()
-
-    cagr_df = load_dataframe(
+    rolling_df = load_dataframe(
         spark=spark,
         connection=connection,
-        query=cagr_query
+        query=rolling_query
     )
 
     validate_dataframe(
-        cagr_df,
-        "CAGR"
+        rolling_df,
+        "Raw Rolling Metrics"
     )
 
-    # =====================================================
-    # SHARPE RATIO
-    # =====================================================
-
-    sharpe_query = build_sharpe_ratio_query()
-
-    sharpe_df = load_dataframe(
-        spark=spark,
-        connection=connection,
-        query=sharpe_query
+    rolling_df = clean_metrics(
+        rolling_df
     )
 
     validate_dataframe(
-        sharpe_df,
-        "Sharpe Ratio"
+        rolling_df,
+        "Clean Rolling Metrics"
     )
-
-    # =====================================================
-    # DAILY VOLATILITY
-    # =====================================================
-
-    daily_volatility_query = (
-        build_daily_volatility_query()
-    )
-
-    daily_volatility_df = load_dataframe(
-        spark=spark,
-        connection=connection,
-        query=daily_volatility_query
-    )
-
-    validate_dataframe(
-        daily_volatility_df,
-        "Daily Volatility"
-    )
-
-    # =====================================================
-    # ANNUALIZED VOLATILITY
-    # =====================================================
-
-    annualized_volatility_query = (
-        build_annualized_volatility_query()
-    )
-
-    annualized_volatility_df = load_dataframe(
-        spark=spark,
-        connection=connection,
-        query=annualized_volatility_query
-    )
-
-    validate_dataframe(
-        annualized_volatility_df,
-        "Annualized Volatility"
-    )
-
-    # =====================================================
-    # JOIN METRICS
-    # =====================================================
-
-    final_df = join_metrics(
-        cagr_df=cagr_df,
-        sharpe_df=sharpe_df,
-        daily_volatility_df=daily_volatility_df,
-        annualized_volatility_df=annualized_volatility_df
-    )
-
-    validate_dataframe(
-        final_df,
-        "Final Metrics"
-    )
-
-    # =====================================================
-    # WRITE OUTPUT
-    # =====================================================
 
     write_to_postgres(
-        df=final_df,
+        df=rolling_df,
         connection=connection
     )
-
-    # =====================================================
-    # STOP SPARK
-    # =====================================================
 
     spark.stop()
 
     logger.info(
-        "Aggregate metrics pipeline completed successfully."
+        "Rolling metrics pipeline completed successfully"
     )
+
 
 # =========================================================
 # ENTRY POINT
@@ -614,7 +387,9 @@ def calculate_aggregate_metrics():
 
 def main():
 
-    calculate_aggregate_metrics()
+    calculate_rolling_metrics()
+
 
 if __name__ == "__main__":
+
     main()
